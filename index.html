@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Application Form</title>
     <link rel="stylesheet" href="styles.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrious/4.0.2/qrious.min.js"></script>
 </head>
 <body>
     <!-- Dashboard Screen -->
@@ -209,9 +210,9 @@
                     <p class="payment-value payment-amount" id="paymentModalAmount">₹0</p>
                 </div>
                 <div class="payment-qr-container">
-                    <img id="paymentQrImage" src="assets/upi-image.png" alt="UPI QR Code" onerror="this.style.display='none'; document.getElementById('qrError').style.display='block';">
+                    <canvas id="paymentQrCanvas" width="200" height="200"></canvas>
                     <div id="qrError" class="qr-error hidden">
-                        <p>QR image not found. Please place your UPI QR image at: assets/upi-image.png</p>
+                        <p>Unable to generate QR code. Please enter a valid amount.</p>
                     </div>
                 </div>
                 <p class="payment-instruction">Scan & Pay using any UPI app</p>

@@ -66,7 +66,15 @@ function setupEventListeners() {
     document.getElementById('scanPanBtn').addEventListener('click', () => performOCR('pan'));
 
     // UPI Payment
-    document.getElementById('payNowBtn').addEventListener('click', showPaymentModal);
+    const payNowBtn = document.getElementById('payNowBtn');
+    if (payNowBtn) {
+        payNowBtn.addEventListener('click', () => {
+            console.log('Pay Now button clicked');
+            showPaymentModal();
+        });
+    } else {
+        console.error('Pay Now button not found');
+    }
     document.getElementById('closePaymentModal').addEventListener('click', closePaymentModal);
     document.getElementById('openUpiAppBtn').addEventListener('click', openUpiApp);
     paymentModal.addEventListener('click', (e) => {
@@ -85,6 +93,20 @@ function setupEventListeners() {
     // Input Formatting
     document.getElementById('aadhaarNumber').addEventListener('input', formatAadhaar);
     document.getElementById('panNumber').addEventListener('input', formatPAN);
+    
+    // Amount change listener for dynamic QR regeneration
+    document.getElementById('amount').addEventListener('input', () => {
+        // If payment modal is open, regenerate QR with new amount
+        if (!paymentModal.classList.contains('hidden')) {
+            const amount = document.getElementById('amount').value;
+            if (amount && parseFloat(amount) > 0) {
+                const formattedAmount = parseFloat(amount).toLocaleString('en-IN');
+                document.getElementById('paymentModalAmount').textContent = `₹${formattedAmount}`;
+                const upiUri = generateUpiUri(amount);
+                generateQrCode(upiUri);
+            }
+        }
+    });
 }
 
 // Photo Upload Setup
@@ -95,10 +117,23 @@ function setupPhotoUpload(inputId, placeholderId, previewId, imgId, retakeBtnId)
     const img = document.getElementById(imgId);
     const retakeBtn = document.getElementById(retakeBtnId);
 
-    placeholder.addEventListener('click', () => input.click());
-    retakeBtn.addEventListener('click', () => input.click());
+    if (!input || !placeholder || !preview || !img || !retakeBtn) {
+        console.error('Photo upload setup failed - missing elements:', { inputId, placeholderId, previewId, imgId, retakeBtnId });
+        return;
+    }
+
+    placeholder.addEventListener('click', () => {
+        console.log('Placeholder clicked, triggering file input');
+        input.click();
+    });
+    
+    retakeBtn.addEventListener('click', () => {
+        console.log('Retake clicked, triggering file input');
+        input.click();
+    });
 
     input.addEventListener('change', (e) => {
+        console.log('File input changed', e.target.files);
         const file = e.target.files[0];
         if (file) {
             const reader = new FileReader();
@@ -106,71 +141,189 @@ function setupPhotoUpload(inputId, placeholderId, previewId, imgId, retakeBtnId)
                 img.src = event.target.result;
                 placeholder.classList.add('hidden');
                 preview.classList.remove('hidden');
+                console.log('Photo loaded successfully');
             };
             reader.readAsDataURL(file);
         }
     });
 }
 
-// Image Preprocessing for OCR
+// Debug logging for development
+const DEBUG_OCR = true;
+
+function logDebug(message, data = null) {
+    if (DEBUG_OCR) {
+        console.log('[OCR Debug]', message, data || '');
+    }
+}
+
+// Image Preprocessing for OCR - Robust mobile camera pipeline
 async function preprocessImage(file) {
-    return new Promise((resolve) => {
+    logDebug('Starting image preprocessing', {
+        type: file.type,
+        size: file.size,
+        name: file.name
+    });
+
+    return new Promise((resolve, reject) => {
         const img = new Image();
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
+        const reader = new FileReader();
         
-        img.onload = () => {
-            // Resize to optimal dimensions for OCR
-            const maxWidth = 2000;
-            const maxHeight = 2000;
-            let width = img.width;
-            let height = img.height;
-            
-            if (width > maxWidth) {
-                height = (height * maxWidth) / width;
-                width = maxWidth;
-            }
-            if (height > maxHeight) {
-                width = (width * maxHeight) / height;
-                height = maxHeight;
-            }
-            
-            canvas.width = width;
-            canvas.height = height;
-            
-            // Draw image
-            ctx.drawImage(img, 0, 0, width, height);
-            
-            // Get image data for processing
-            let imageData = ctx.getImageData(0, 0, width, height);
-            let data = imageData.data;
-            
-            // Convert to grayscale and enhance contrast
-            for (let i = 0; i < data.length; i += 4) {
-                const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-                // Contrast enhancement
-                const contrast = 1.5;
-                const factor = (259 * (contrast + 255)) / (255 * (259 - contrast));
-                const enhanced = factor * (gray - 128) + 128;
-                
-                data[i] = enhanced;
-                data[i + 1] = enhanced;
-                data[i + 2] = enhanced;
-            }
-            
-            ctx.putImageData(imageData, 0, 0);
-            
-            // Convert to blob
-            canvas.toBlob((blob) => {
-                resolve(blob);
-            }, 'image/jpeg', 0.95);
+        reader.onload = (e) => {
+            img.src = e.target.result;
         };
         
-        img.src = URL.createObjectURL(file);
+        reader.onerror = () => {
+            reject(new Error('Failed to read file'));
+        };
+        
+        img.onload = async () => {
+            logDebug('Image loaded', {
+                width: img.width,
+                height: img.height,
+                aspectRatio: img.width / img.height
+            });
+
+            try {
+                // Create multiple preprocessing versions (await the async function)
+                const versions = await createPreprocessedVersions(img);
+                
+                // Return all versions for OCR to try
+                resolve(versions);
+            } catch (error) {
+                logDebug('Preprocessing error', error);
+                reject(error);
+            }
+        };
+        
+        img.onerror = () => {
+            reject(new Error('Failed to load image'));
+        };
+        
+        reader.readAsDataURL(file);
     });
 }
 
-// OCR Functionality
+// Create multiple preprocessed versions of the image
+async function createPreprocessedVersions(img) {
+    const maxWidth = 2000;
+    const maxHeight = 2000;
+    let width = img.width;
+    let height = img.height;
+    
+    // Calculate dimensions maintaining aspect ratio
+    if (width > maxWidth) {
+        height = (height * maxWidth) / width;
+        width = maxWidth;
+    }
+    if (height > maxHeight) {
+        width = (width * maxHeight) / height;
+        height = maxHeight;
+    }
+    
+    logDebug('Target dimensions', { width, height });
+    
+    // Create canvas for original
+    const canvasOriginal = document.createElement('canvas');
+    canvasOriginal.width = width;
+    canvasOriginal.height = height;
+    const ctxOriginal = canvasOriginal.getContext('2d');
+    ctxOriginal.drawImage(img, 0, 0, width, height);
+    
+    // Create grayscale version
+    const canvasGray = document.createElement('canvas');
+    canvasGray.width = width;
+    canvasGray.height = height;
+    const ctxGray = canvasGray.getContext('2d');
+    ctxGray.drawImage(img, 0, 0, width, height);
+    const imageDataGray = ctxGray.getImageData(0, 0, width, height);
+    const dataGray = imageDataGray.data;
+    
+    for (let i = 0; i < dataGray.length; i += 4) {
+        const gray = 0.299 * dataGray[i] + 0.587 * dataGray[i + 1] + 0.114 * dataGray[i + 2];
+        dataGray[i] = gray;
+        dataGray[i + 1] = gray;
+        dataGray[i + 2] = gray;
+    }
+    ctxGray.putImageData(imageDataGray, 0, 0);
+    
+    // Create high contrast version
+    const canvasHighContrast = document.createElement('canvas');
+    canvasHighContrast.width = width;
+    canvasHighContrast.height = height;
+    const ctxHighContrast = canvasHighContrast.getContext('2d');
+    ctxHighContrast.drawImage(img, 0, 0, width, height);
+    const imageDataHigh = ctxHighContrast.getImageData(0, 0, width, height);
+    const dataHigh = imageDataHigh.data;
+    
+    for (let i = 0; i < dataHigh.length; i += 4) {
+        const gray = 0.299 * dataHigh[i] + 0.587 * dataHigh[i + 1] + 0.114 * dataHigh[i + 2];
+        // High contrast enhancement
+        const contrast = 2.0;
+        const factor = (259 * (contrast + 255)) / (255 * (259 - contrast));
+        const enhanced = Math.max(0, Math.min(255, factor * (gray - 128) + 128));
+        
+        dataHigh[i] = enhanced;
+        dataHigh[i + 1] = enhanced;
+        dataHigh[i + 2] = enhanced;
+    }
+    ctxHighContrast.putImageData(imageDataHigh, 0, 0);
+    
+    // Create threshold/binary version
+    const canvasThreshold = document.createElement('canvas');
+    canvasThreshold.width = width;
+    canvasThreshold.height = height;
+    const ctxThreshold = canvasThreshold.getContext('2d');
+    ctxThreshold.drawImage(img, 0, 0, width, height);
+    const imageDataThresh = ctxThreshold.getImageData(0, 0, width, height);
+    const dataThresh = imageDataThresh.data;
+    
+    // Calculate average brightness for adaptive threshold
+    let totalBrightness = 0;
+    for (let i = 0; i < dataThresh.length; i += 4) {
+        const gray = 0.299 * dataThresh[i] + 0.587 * dataThresh[i + 1] + 0.114 * dataThresh[i + 2];
+        totalBrightness += gray;
+    }
+    const avgBrightness = totalBrightness / (dataThresh.length / 4);
+    const threshold = avgBrightness * 0.85; // Slightly below average
+    
+    logDebug('Adaptive threshold', { avgBrightness, threshold });
+    
+    for (let i = 0; i < dataThresh.length; i += 4) {
+        const gray = 0.299 * dataThresh[i] + 0.587 * dataThresh[i + 1] + 0.114 * dataThresh[i + 2];
+        const binary = gray > threshold ? 255 : 0;
+        dataThresh[i] = binary;
+        dataThresh[i + 1] = binary;
+        dataThresh[i + 2] = binary;
+    }
+    ctxThreshold.putImageData(imageDataThresh, 0, 0);
+    
+    // Convert canvases to blobs (await all)
+    const [original, grayscale, highContrast, thresholdBlob] = await Promise.all([
+        canvasToBlob(canvasOriginal, 'image/jpeg', 0.95),
+        canvasToBlob(canvasGray, 'image/jpeg', 0.95),
+        canvasToBlob(canvasHighContrast, 'image/jpeg', 0.95),
+        canvasToBlob(canvasThreshold, 'image/jpeg', 0.95)
+    ]);
+    
+    return {
+        original,
+        grayscale,
+        highContrast,
+        threshold: thresholdBlob
+    };
+}
+
+// Helper: Convert canvas to blob
+function canvasToBlob(canvas, type, quality) {
+    return new Promise((resolve) => {
+        canvas.toBlob((blob) => {
+            resolve(blob);
+        }, type, quality);
+    });
+}
+
+// OCR Functionality - Try multiple preprocessing versions
 async function performOCR(type) {
     const inputId = type === 'aadhaar' ? 'aadhaarPhoto' : 'panPhoto';
     const input = document.getElementById(inputId);
@@ -182,22 +335,65 @@ async function performOCR(type) {
         return;
     }
 
-    messageDiv.textContent = 'Processing... Please wait';
+    messageDiv.textContent = 'Processing document...';
     messageDiv.className = 'ocr-message show info';
 
     try {
-        // Preprocess image for better OCR
-        const processedImage = await preprocessImage(input.files[0]);
+        // Preprocess image - get multiple versions
+        const versions = await preprocessImage(input.files[0]);
         
-        const result = await Tesseract.recognize(processedImage, 'eng', {
-            logger: (m) => {
-                if (m.status === 'recognizing text') {
-                    messageDiv.textContent = `Processing... ${Math.round(m.progress * 100)}%`;
+        // Try OCR on different versions, starting with high contrast
+        const ocrVersions = [
+            { name: 'high contrast', blob: versions.highContrast },
+            { name: 'grayscale', blob: versions.grayscale },
+            { name: 'threshold', blob: versions.threshold },
+            { name: 'original', blob: versions.original }
+        ];
+        
+        let bestResult = null;
+        let bestConfidence = 0;
+        
+        for (const version of ocrVersions) {
+            logDebug(`Trying OCR with ${version} version`);
+            
+            try {
+                const result = await Tesseract.recognize(version.blob, 'eng', {
+                    logger: (m) => {
+                        if (m.status === 'recognizing text') {
+                            messageDiv.textContent = `Processing... (${version}) ${Math.round(m.progress * 100)}%`;
+                        }
+                    }
+                });
+                
+                const confidence = result.data.confidence || 0;
+                logDebug(`${version} OCR confidence`, confidence);
+                
+                if (confidence > bestConfidence) {
+                    bestConfidence = confidence;
+                    bestResult = result;
                 }
+                
+                // If we got a good result, stop trying
+                if (confidence > 70) {
+                    logDebug('Good confidence found, stopping', confidence);
+                    break;
+                }
+            } catch (error) {
+                logDebug(`OCR failed for ${version}`, error);
+                continue;
             }
+        }
+        
+        if (!bestResult) {
+            throw new Error('OCR failed on all versions');
+        }
+        
+        logDebug('Best OCR result', {
+            confidence: bestConfidence,
+            textLength: bestResult.data.text.length
         });
-
-        const text = result.data.text;
+        
+        const text = bestResult.data.text;
         
         if (type === 'aadhaar') {
             processAadhaarOCR(text, messageDiv);
@@ -206,6 +402,7 @@ async function performOCR(type) {
         }
     } catch (error) {
         console.error('OCR Error:', error);
+        logDebug('OCR error', error);
         messageDiv.textContent = 'Unable to read the document clearly. Please retake the photo or enter the details manually.';
         messageDiv.className = 'ocr-message show error';
     }
@@ -245,8 +442,13 @@ function processAadhaarOCR(text, messageDiv) {
     const dobMatch = text.match(/\b(0[1-9]|[12]\d|3[01])[\/\-](0[1-9]|1[0-2])[\/\-]\d{4}\b/);
     if (dobMatch) {
         const dob = dobMatch[0].replace(/-/g, '/');
-        document.getElementById('dateOfBirth').value = dob;
-        detected = true;
+        // Convert DD/MM/YYYY to yyyy-MM-dd for HTML date input
+        const parts = dob.split('/');
+        if (parts.length === 3) {
+            const formattedDob = `${parts[2]}-${parts[1]}-${parts[0]}`;
+            document.getElementById('dateOfBirth').value = formattedDob;
+            detected = true;
+        }
     }
     
     if (detected) {
@@ -293,8 +495,13 @@ function processPanOCR(text, messageDiv) {
     const dobMatch = text.match(/\b(0[1-9]|[12]\d|3[01])[\/\-](0[1-9]|1[0-2])[\/\-]\d{4}\b/);
     if (dobMatch && !document.getElementById('dateOfBirth').value) {
         const dob = dobMatch[0].replace(/-/g, '/');
-        document.getElementById('dateOfBirth').value = dob;
-        detected = true;
+        // Convert DD/MM/YYYY to yyyy-MM-dd for HTML date input
+        const parts = dob.split('/');
+        if (parts.length === 3) {
+            const formattedDob = `${parts[2]}-${parts[1]}-${parts[0]}`;
+            document.getElementById('dateOfBirth').value = formattedDob;
+            detected = true;
+        }
     }
     
     if (detected) {
@@ -315,6 +522,45 @@ function formatAadhaar(e) {
 function formatPAN(e) {
     let value = e.target.value.toUpperCase();
     e.target.value = value;
+}
+
+// Generate Dynamic UPI URI
+function generateUpiUri(amount) {
+    const params = new URLSearchParams();
+    params.append('pa', UPI_CONFIG.pa);
+    params.append('pn', UPI_CONFIG.pn);
+    params.append('am', parseFloat(amount).toFixed(2));
+    params.append('cu', UPI_CONFIG.cu);
+    params.append('tn', UPI_CONFIG.tn);
+    
+    return `upi://pay?${params.toString()}`;
+}
+
+// Generate Dynamic QR Code
+function generateQrCode(upiUri) {
+    const canvas = document.getElementById('paymentQrCanvas');
+    const qrError = document.getElementById('qrError');
+    
+    if (!canvas) {
+        console.error('QR canvas not found');
+        return;
+    }
+    
+    try {
+        // Use qrious library
+        const qr = new QRious({
+            element: canvas,
+            value: upiUri,
+            size: 200,
+            level: 'H'
+        });
+        canvas.style.display = 'block';
+        qrError.classList.add('hidden');
+    } catch (error) {
+        console.error('QR generation error:', error);
+        canvas.style.display = 'none';
+        qrError.classList.remove('hidden');
+    }
 }
 
 // Show Payment Modal
@@ -340,6 +586,13 @@ function showPaymentModal() {
     const formattedAmount = parseFloat(amount).toLocaleString('en-IN');
     document.getElementById('paymentModalAmount').textContent = `₹${formattedAmount}`;
 
+    // Generate dynamic UPI URI
+    const upiUri = generateUpiUri(amount);
+    console.log('Generated UPI URI:', upiUri);
+
+    // Generate dynamic QR code
+    generateQrCode(upiUri);
+
     // Show modal
     paymentModal.classList.remove('hidden');
 }
@@ -361,12 +614,13 @@ function openUpiApp() {
         return;
     }
 
-    // Construct UPI intent URL
-    const upiUrl = `upi://pay?pa=${encodeURIComponent(UPI_CONFIG.pa)}&pn=${encodeURIComponent(UPI_CONFIG.pn)}&am=${parseFloat(amount).toFixed(2)}&cu=${UPI_CONFIG.cu}&tn=${encodeURIComponent(UPI_CONFIG.tn)}`;
+    // Generate dynamic UPI URI (same as QR)
+    const upiUri = generateUpiUri(amount);
+    console.log('Opening UPI app with URI:', upiUri);
 
     // Try to open UPI app
     try {
-        window.location.href = upiUrl;
+        window.location.href = upiUri;
         showToast('Opening UPI app...', 'success');
         closePaymentModal();
         
