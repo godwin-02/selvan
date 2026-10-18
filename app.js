@@ -10,6 +10,9 @@ const UPI_CONFIG = {
     tn: 'Application Payment'
 };
 
+// UPI QR Image Path (change filename if needed)
+const UPI_QR_IMAGE = 'assets/upi-image.png';
+
 // Google Apps Script URL (Replace with your actual deployment URL)
 const GOOGLE_SCRIPT_URL = 'YOUR_GOOGLE_APPS_SCRIPT_URL_HERE';
 
@@ -17,6 +20,7 @@ const GOOGLE_SCRIPT_URL = 'YOUR_GOOGLE_APPS_SCRIPT_URL_HERE';
 const dashboardScreen = document.getElementById('dashboardScreen');
 const formScreen = document.getElementById('formScreen');
 const viewModal = document.getElementById('viewModal');
+const paymentModal = document.getElementById('paymentModal');
 
 // Initialize Application
 document.addEventListener('DOMContentLoaded', () => {
@@ -62,7 +66,12 @@ function setupEventListeners() {
     document.getElementById('scanPanBtn').addEventListener('click', () => performOCR('pan'));
 
     // UPI Payment
-    document.getElementById('payViaUpiBtn').addEventListener('click', handleUpiPayment);
+    document.getElementById('payNowBtn').addEventListener('click', showPaymentModal);
+    document.getElementById('closePaymentModal').addEventListener('click', closePaymentModal);
+    document.getElementById('openUpiAppBtn').addEventListener('click', openUpiApp);
+    paymentModal.addEventListener('click', (e) => {
+        if (e.target === paymentModal) closePaymentModal();
+    });
 
     // Form Submission
     document.getElementById('applicationForm').addEventListener('submit', handleFormSubmit);
@@ -103,6 +112,64 @@ function setupPhotoUpload(inputId, placeholderId, previewId, imgId, retakeBtnId)
     });
 }
 
+// Image Preprocessing for OCR
+async function preprocessImage(file) {
+    return new Promise((resolve) => {
+        const img = new Image();
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        img.onload = () => {
+            // Resize to optimal dimensions for OCR
+            const maxWidth = 2000;
+            const maxHeight = 2000;
+            let width = img.width;
+            let height = img.height;
+            
+            if (width > maxWidth) {
+                height = (height * maxWidth) / width;
+                width = maxWidth;
+            }
+            if (height > maxHeight) {
+                width = (width * maxHeight) / height;
+                height = maxHeight;
+            }
+            
+            canvas.width = width;
+            canvas.height = height;
+            
+            // Draw image
+            ctx.drawImage(img, 0, 0, width, height);
+            
+            // Get image data for processing
+            let imageData = ctx.getImageData(0, 0, width, height);
+            let data = imageData.data;
+            
+            // Convert to grayscale and enhance contrast
+            for (let i = 0; i < data.length; i += 4) {
+                const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+                // Contrast enhancement
+                const contrast = 1.5;
+                const factor = (259 * (contrast + 255)) / (255 * (259 - contrast));
+                const enhanced = factor * (gray - 128) + 128;
+                
+                data[i] = enhanced;
+                data[i + 1] = enhanced;
+                data[i + 2] = enhanced;
+            }
+            
+            ctx.putImageData(imageData, 0, 0);
+            
+            // Convert to blob
+            canvas.toBlob((blob) => {
+                resolve(blob);
+            }, 'image/jpeg', 0.95);
+        };
+        
+        img.src = URL.createObjectURL(file);
+    });
+}
+
 // OCR Functionality
 async function performOCR(type) {
     const inputId = type === 'aadhaar' ? 'aadhaarPhoto' : 'panPhoto';
@@ -119,7 +186,10 @@ async function performOCR(type) {
     messageDiv.className = 'ocr-message show info';
 
     try {
-        const result = await Tesseract.recognize(input.files[0], 'eng', {
+        // Preprocess image for better OCR
+        const processedImage = await preprocessImage(input.files[0]);
+        
+        const result = await Tesseract.recognize(processedImage, 'eng', {
             logger: (m) => {
                 if (m.status === 'recognizing text') {
                     messageDiv.textContent = `Processing... ${Math.round(m.progress * 100)}%`;
@@ -136,43 +206,104 @@ async function performOCR(type) {
         }
     } catch (error) {
         console.error('OCR Error:', error);
-        messageDiv.textContent = 'Could not reliably detect the details. Please enter them manually.';
+        messageDiv.textContent = 'Unable to read the document clearly. Please retake the photo or enter the details manually.';
         messageDiv.className = 'ocr-message show error';
     }
 }
 
 function processAadhaarOCR(text, messageDiv) {
-    // Extract 12-digit Aadhaar number
+    let detected = false;
+    
+    // Extract 12-digit Aadhaar number (various formats)
     const aadhaarMatch = text.match(/\b\d{4}[\s-]?\d{4}[\s-]?\d{4}\b|\b\d{12}\b/g);
     
     if (aadhaarMatch) {
         const aadhaarNumber = aadhaarMatch[0].replace(/[\s-]/g, '');
         if (aadhaarNumber.length === 12) {
             document.getElementById('aadhaarNumber').value = aadhaarNumber;
-            messageDiv.textContent = 'Aadhaar number detected — please verify before saving.';
-            messageDiv.className = 'ocr-message show success';
-            return;
+            detected = true;
         }
     }
-
-    messageDiv.textContent = 'Could not reliably detect the Aadhaar number. Please enter it manually.';
-    messageDiv.className = 'ocr-message show error';
+    
+    // Try to extract name (usually appears before Aadhaar number)
+    const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        // Look for name pattern (uppercase words, not numbers)
+        if (/^[A-Z][a-z]+(\s+[A-Z][a-z]+)+$/.test(line) && !/\d/.test(line) && line.length > 3 && line.length < 50) {
+            // Check if it's not a common header
+            const lowerLine = line.toLowerCase();
+            if (!lowerLine.includes('aadhaar') && !lowerLine.includes('government') && !lowerLine.includes('india') && !lowerLine.includes('unique')) {
+                document.getElementById('fullName').value = line;
+                detected = true;
+                break;
+            }
+        }
+    }
+    
+    // Try to extract DOB (format: DD/MM/YYYY or DD-MM-YYYY)
+    const dobMatch = text.match(/\b(0[1-9]|[12]\d|3[01])[\/\-](0[1-9]|1[0-2])[\/\-]\d{4}\b/);
+    if (dobMatch) {
+        const dob = dobMatch[0].replace(/-/g, '/');
+        document.getElementById('dateOfBirth').value = dob;
+        detected = true;
+    }
+    
+    if (detected) {
+        messageDiv.textContent = 'Please verify the scanned details before saving.';
+        messageDiv.className = 'ocr-message show success';
+    } else {
+        messageDiv.textContent = 'Unable to read the document clearly. Please retake the photo or enter the details manually.';
+        messageDiv.className = 'ocr-message show error';
+    }
 }
 
 function processPanOCR(text, messageDiv) {
+    let detected = false;
+    
     // Extract PAN pattern: 5 letters + 4 digits + 1 letter
     const panMatch = text.match(/[A-Z]{5}[0-9]{4}[A-Z]{1}/i);
     
     if (panMatch) {
         const panNumber = panMatch[0].toUpperCase();
         document.getElementById('panNumber').value = panNumber;
-        messageDiv.textContent = 'PAN detected — please verify before saving.';
-        messageDiv.className = 'ocr-message show success';
-        return;
+        detected = true;
     }
-
-    messageDiv.textContent = 'Could not reliably detect the PAN number. Please enter it manually.';
-    messageDiv.className = 'ocr-message show error';
+    
+    // Try to extract name from PAN card
+    const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        // Look for name pattern
+        if (/^[A-Z][a-z]+(\s+[A-Z][a-z]+)+$/.test(line) && !/\d/.test(line) && line.length > 3 && line.length < 50) {
+            const lowerLine = line.toLowerCase();
+            if (!lowerLine.includes('permanent') && !lowerLine.includes('account') && !lowerLine.includes('number') && !lowerLine.includes('income') && !lowerLine.includes('tax')) {
+                // Only fill name if empty or if current name is shorter
+                const currentName = document.getElementById('fullName').value;
+                if (!currentName || line.length > currentName.length) {
+                    document.getElementById('fullName').value = line;
+                    detected = true;
+                }
+                break;
+            }
+        }
+    }
+    
+    // Try to extract DOB
+    const dobMatch = text.match(/\b(0[1-9]|[12]\d|3[01])[\/\-](0[1-9]|1[0-2])[\/\-]\d{4}\b/);
+    if (dobMatch && !document.getElementById('dateOfBirth').value) {
+        const dob = dobMatch[0].replace(/-/g, '/');
+        document.getElementById('dateOfBirth').value = dob;
+        detected = true;
+    }
+    
+    if (detected) {
+        messageDiv.textContent = 'Please verify the scanned details before saving.';
+        messageDiv.className = 'ocr-message show success';
+    } else {
+        messageDiv.textContent = 'Unable to read the document clearly. Please retake the photo or enter the details manually.';
+        messageDiv.className = 'ocr-message show error';
+    }
 }
 
 // Input Formatting
@@ -186,18 +317,49 @@ function formatPAN(e) {
     e.target.value = value;
 }
 
-// UPI Payment Handler
-function handleUpiPayment() {
+// Show Payment Modal
+function showPaymentModal() {
     const amount = document.getElementById('amount').value;
     const errorDiv = document.getElementById('upiError');
 
     if (!amount || parseFloat(amount) <= 0) {
-        errorDiv.textContent = 'Please enter a valid amount greater than ₹0';
+        errorDiv.textContent = 'Please enter the amount first.';
+        errorDiv.classList.add('show');
+        return;
+    }
+
+    if (parseFloat(amount) <= 0) {
+        errorDiv.textContent = 'Please enter a valid amount.';
         errorDiv.classList.add('show');
         return;
     }
 
     errorDiv.classList.remove('show');
+
+    // Display amount in modal
+    const formattedAmount = parseFloat(amount).toLocaleString('en-IN');
+    document.getElementById('paymentModalAmount').textContent = `₹${formattedAmount}`;
+
+    // Show modal
+    paymentModal.classList.remove('hidden');
+}
+
+// Close Payment Modal
+function closePaymentModal() {
+    paymentModal.classList.add('hidden');
+}
+
+// Open UPI App
+function openUpiApp() {
+    const amount = document.getElementById('amount').value;
+    const errorDiv = document.getElementById('upiError');
+
+    if (!amount || parseFloat(amount) <= 0) {
+        errorDiv.textContent = 'Please enter a valid amount.';
+        errorDiv.classList.add('show');
+        closePaymentModal();
+        return;
+    }
 
     // Construct UPI intent URL
     const upiUrl = `upi://pay?pa=${encodeURIComponent(UPI_CONFIG.pa)}&pn=${encodeURIComponent(UPI_CONFIG.pn)}&am=${parseFloat(amount).toFixed(2)}&cu=${UPI_CONFIG.cu}&tn=${encodeURIComponent(UPI_CONFIG.tn)}`;
@@ -206,13 +368,15 @@ function handleUpiPayment() {
     try {
         window.location.href = upiUrl;
         showToast('Opening UPI app...', 'success');
+        closePaymentModal();
         
         // Update payment status to pending
         document.getElementById('paymentStatus').textContent = 'Pending';
         document.getElementById('paymentStatus').className = 'status-badge status-pending';
     } catch (error) {
-        errorDiv.textContent = 'Unable to open a UPI application. Please try again or use the QR code.';
+        errorDiv.textContent = 'Unable to open a UPI app. Please scan the QR code instead.';
         errorDiv.classList.add('show');
+        closePaymentModal();
     }
 }
 
