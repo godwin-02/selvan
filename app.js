@@ -1,6 +1,8 @@
 // Application State
 let applications = [];
 let editingApplicationId = null;
+let aadhaarFile = null;
+let panFile = null;
 
 // UPI Configuration
 const UPI_CONFIG = {
@@ -136,6 +138,24 @@ function setupPhotoUpload(inputId, placeholderId, previewId, imgId, retakeBtnId)
         console.log('File input changed', e.target.files);
         const file = e.target.files[0];
         if (file) {
+            // Debug logging
+            console.log('Camera capture details:', {
+                name: file.name,
+                type: file.type,
+                size: file.size,
+                lastModified: file.lastModified,
+                isFile: file instanceof File
+            });
+            
+            // Store file in application state
+            if (inputId === 'aadhaarPhoto') {
+                aadhaarFile = file;
+                console.log('Stored aadhaarFile in state', aadhaarFile);
+            } else if (inputId === 'panPhoto') {
+                panFile = file;
+                console.log('Stored panFile in state', panFile);
+            }
+            
             const reader = new FileReader();
             reader.onload = (event) => {
                 img.src = event.target.result;
@@ -143,8 +163,20 @@ function setupPhotoUpload(inputId, placeholderId, previewId, imgId, retakeBtnId)
                 preview.classList.remove('hidden');
                 console.log('Photo loaded successfully');
             };
+            reader.onerror = () => {
+                console.error('Failed to read file');
+                alert('Unable to load the captured image. Please retake the photo.');
+            };
             reader.readAsDataURL(file);
+        } else {
+            console.log('No file selected - camera may have been cancelled');
         }
+    });
+    
+    // Handle camera permission errors
+    input.addEventListener('error', (e) => {
+        console.error('File input error:', e);
+        alert('Camera permission is required to scan the document. Please allow camera access and try again.');
     });
 }
 
@@ -325,13 +357,23 @@ function canvasToBlob(canvas, type, quality) {
 
 // OCR Functionality - Try multiple preprocessing versions
 async function performOCR(type) {
-    const inputId = type === 'aadhaar' ? 'aadhaarPhoto' : 'panPhoto';
-    const input = document.getElementById(inputId);
     const messageDiv = document.getElementById(type === 'aadhaar' ? 'aadhaarOcrMessage' : 'panOcrMessage');
+    
+    // Use stored file from application state
+    const file = type === 'aadhaar' ? aadhaarFile : panFile;
+    
+    console.log('OCR attempting with file:', {
+        type,
+        fileExists: !!file,
+        fileName: file ? file.name : 'none',
+        fileType: file ? file.type : 'none',
+        fileSize: file ? file.size : 'none'
+    });
 
-    if (!input.files || !input.files[0]) {
-        messageDiv.textContent = 'Please upload a photo first';
+    if (!file) {
+        messageDiv.textContent = 'Please capture or upload a photo first';
         messageDiv.className = 'ocr-message show error';
+        console.error('No file available for OCR', type);
         return;
     }
 
@@ -340,7 +382,7 @@ async function performOCR(type) {
 
     try {
         // Preprocess image - get multiple versions
-        const versions = await preprocessImage(input.files[0]);
+        const versions = await preprocessImage(file);
         
         // Try OCR on different versions, starting with high contrast
         const ocrVersions = [
