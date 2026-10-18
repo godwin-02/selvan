@@ -752,6 +752,30 @@ async function handleFormSubmit(e) {
 
     submitError.classList.remove('show');
 
+    // Debug: Check file availability before upload
+    console.log('Before upload - File state:', {
+        aadhaarFileExists: !!aadhaarFile,
+        aadhaarFileSize: aadhaarFile ? aadhaarFile.size : 0,
+        aadhaarFileType: aadhaarFile ? aadhaarFile.type : 'none',
+        panFileExists: !!panFile,
+        panFileSize: panFile ? panFile.size : 0,
+        panFileType: panFile ? panFile.type : 'none'
+    });
+
+    // Convert files to base64 for upload
+    let aadhaarBase64 = null;
+    let panBase64 = null;
+
+    if (aadhaarFile) {
+        aadhaarBase64 = await fileToBase64(aadhaarFile);
+        console.log('Aadhaar converted to base64, length:', aadhaarBase64?.length);
+    }
+
+    if (panFile) {
+        panBase64 = await fileToBase64(panFile);
+        console.log('PAN converted to base64, length:', panBase64?.length);
+    }
+
     const application = {
         applicationId: editingApplicationId || generateApplicationId(),
         date: new Date().toISOString().split('T')[0],
@@ -763,10 +787,19 @@ async function handleFormSubmit(e) {
         amount: parseFloat(document.getElementById('amount').value),
         paymentStatus: document.getElementById('paymentStatus').textContent,
         paymentTimestamp: document.getElementById('paymentStatus').textContent === 'Paid' ? new Date().toISOString() : null,
-        createdBy: 'System'
+        createdBy: 'System',
+        aadhaarPhoto: aadhaarBase64,
+        panPhoto: panBase64
     };
 
     try {
+        console.log('Sending application to backend:', {
+            hasAadhaar: !!application.aadhaarPhoto,
+            hasPan: !!application.panPhoto,
+            aadhaarLength: application.aadhaarPhoto?.length,
+            panLength: application.panPhoto?.length
+        });
+
         // Try to send to Google Sheets
         if (GOOGLE_SCRIPT_URL && GOOGLE_SCRIPT_URL !== 'YOUR_GOOGLE_APPS_SCRIPT_URL_HERE') {
             await sendToGoogleSheets(application);
@@ -788,6 +821,8 @@ async function handleFormSubmit(e) {
         
         // Reset and go to dashboard
         editingApplicationId = null;
+        aadhaarFile = null;
+        panFile = null;
         showDashboard();
     } catch (error) {
         console.error('Save Error:', error);
@@ -796,13 +831,29 @@ async function handleFormSubmit(e) {
     }
 }
 
+// Helper: Convert File to Base64
+function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const result = reader.result;
+            // Remove data URL prefix to get pure base64
+            const base64 = result.split(',')[1];
+            resolve(base64);
+        };
+        reader.onerror = (error) => {
+            console.error('File to base64 error:', error);
+            reject(error);
+        };
+        reader.readAsDataURL(file);
+    });
+}
+
 // Generate Application ID
 function generateApplicationId() {
-    const now = new Date();
-    const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '');
-    const count = applications.filter(app => app.applicationId && app.applicationId.includes(dateStr)).length + 1;
-    const countStr = count.toString().padStart(4, '0');
-    return `APP-${dateStr}-${countStr}`;
+    const timestamp = Date.now().toString(36).toUpperCase();
+    const random = Math.random().toString(36).substring(2, 8).toUpperCase();
+    return `APP${timestamp}${random}`;
 }
 
 // Google Sheets Integration
