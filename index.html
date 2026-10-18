@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Application Form</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- Dashboard Screen -->
+    <div id="dashboardScreen" class="screen hidden">
+        <div class="dashboard-header">
+            <h1>Application Dashboard</h1>
+        </div>
+        
+        <!-- Stats Cards -->
+        <div class="stats-container">
+            <div class="stat-card">
+                <div class="stat-value" id="totalApps">0</div>
+                <div class="stat-label">Total Applications</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="pendingPayments">0</div>
+                <div class="stat-label">Pending Payments</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="paidApps">0</div>
+                <div class="stat-label">Paid Applications</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="totalAmount">₹0</div>
+                <div class="stat-label">Total Collected</div>
+            </div>
+        </div>
+
+        <!-- Search and Filter -->
+        <div class="search-filter-container">
+            <input type="text" id="searchInput" placeholder="Search by name or Application ID..." class="search-input">
+            <select id="statusFilter" class="filter-select">
+                <option value="">All Status</option>
+                <option value="Pending">Pending</option>
+                <option value="Paid">Paid</option>
+            </select>
+            <input type="date" id="dateFilter" class="filter-date">
+        </div>
+
+        <!-- New Application Button -->
+        <button id="newAppBtn" class="btn btn-primary btn-full">+ New Application</button>
+
+        <!-- Applications List -->
+        <div class="applications-list">
+            <div id="applicationsList"></div>
+        </div>
+    </div>
+
+    <!-- Application Form Screen -->
+    <div id="formScreen" class="screen">
+        <div class="form-header">
+            <button id="backToDashboard" class="btn btn-back">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M19 12H5M12 19l-7-7 7-7"/>
+                </svg>
+            </button>
+            <h1>Application Form</h1>
+        </div>
+
+        <form id="applicationForm" class="application-form">
+            <!-- Full Name -->
+            <div class="form-group">
+                <label for="fullName">Full Name *</label>
+                <input type="text" id="fullName" placeholder="Enter full name" required>
+                <div class="error-message" id="fullNameError"></div>
+            </div>
+
+            <!-- Aadhaar Card Photo -->
+            <div class="form-group">
+                <label>Aadhaar Card Photo</label>
+                <div class="photo-upload" id="aadhaarPhotoUpload">
+                    <input type="file" id="aadhaarPhoto" accept="image/*" capture="environment" hidden>
+                    <div class="photo-placeholder" id="aadhaarPhotoPlaceholder">
+                        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                            <circle cx="12" cy="13" r="4"/>
+                        </svg>
+                        <p>Tap to take photo or select</p>
+                    </div>
+                    <div class="photo-preview hidden" id="aadhaarPhotoPreview">
+                        <img id="aadhaarPreviewImg" alt="Aadhaar preview">
+                        <button type="button" class="btn btn-retake" id="retakeAadhaar">Retake / Change</button>
+                    </div>
+                </div>
+                <button type="button" class="btn btn-secondary btn-small" id="scanAadhaarBtn">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 7V5a2 2 0 0 1 2-2h2"/>
+                        <path d="M17 3h2a2 2 0 0 1 2 2v2"/>
+                        <path d="M21 17v2a2 2 0 0 1-2 2h-2"/>
+                        <path d="M7 21H5a2 2 0 0 1-2-2v-2"/>
+                    </svg>
+                    Scan Aadhaar & Auto Fill
+                </button>
+                <div class="ocr-message" id="aadhaarOcrMessage"></div>
+            </div>
+
+            <!-- Aadhaar Number -->
+            <div class="form-group">
+                <label for="aadhaarNumber">Aadhaar Card Number *</label>
+                <input type="text" id="aadhaarNumber" placeholder="Enter 12-digit Aadhaar number" maxlength="12" pattern="[0-9]{12}" required>
+                <div class="error-message" id="aadhaarNumberError"></div>
+            </div>
+
+            <!-- PAN Card Photo -->
+            <div class="form-group">
+                <label>PAN Card Photo</label>
+                <div class="photo-upload" id="panPhotoUpload">
+                    <input type="file" id="panPhoto" accept="image/*" capture="environment" hidden>
+                    <div class="photo-placeholder" id="panPhotoPlaceholder">
+                        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                            <circle cx="12" cy="13" r="4"/>
+                        </svg>
+                        <p>Tap to take photo or select</p>
+                    </div>
+                    <div class="photo-preview hidden" id="panPhotoPreview">
+                        <img id="panPreviewImg" alt="PAN preview">
+                        <button type="button" class="btn btn-retake" id="retakePan">Retake / Change</button>
+                    </div>
+                </div>
+                <button type="button" class="btn btn-secondary btn-small" id="scanPanBtn">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 7V5a2 2 0 0 1 2-2h2"/>
+                        <path d="M17 3h2a2 2 0 0 1 2 2v2"/>
+                        <path d="M21 17v2a2 2 0 0 1-2 2h-2"/>
+                        <path d="M7 21H5a2 2 0 0 1-2-2v-2"/>
+                    </svg>
+                    Scan PAN & Auto Fill
+                </button>
+                <div class="ocr-message" id="panOcrMessage"></div>
+            </div>
+
+            <!-- PAN Number -->
+            <div class="form-group">
+                <label for="panNumber">PAN Card Number *</label>
+                <input type="text" id="panNumber" placeholder="ABCDE1234F" maxlength="10" style="text-transform: uppercase;" required>
+                <div class="error-message" id="panNumberError"></div>
+            </div>
+
+            <!-- Date of Birth -->
+            <div class="form-group">
+                <label for="dateOfBirth">Date of Birth *</label>
+                <input type="date" id="dateOfBirth" required>
+                <div class="error-message" id="dateOfBirthError"></div>
+            </div>
+
+            <!-- Amount -->
+            <div class="form-group">
+                <label for="amount">Amount (₹) *</label>
+                <input type="number" id="amount" placeholder="Enter amount" min="1" step="1" required>
+                <div class="error-message" id="amountError"></div>
+            </div>
+
+            <!-- UPI Payment Section -->
+            <div class="payment-section">
+                <div class="payment-info">
+                    <p class="payment-note">The entered amount will automatically be filled in the UPI payment screen.</p>
+                </div>
+                <button type="button" class="btn btn-primary btn-full btn-upi" id="payViaUpiBtn">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 12V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v5m18 0v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5m18 0h-3m-12 0H3m14 0a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2z"/>
+                    </svg>
+                    Pay via UPI
+                </button>
+                <div class="error-message" id="upiError"></div>
+
+                <!-- QR Code Fallback -->
+                <div class="qr-section">
+                    <div class="qr-container">
+                        <div class="qr-placeholder">
+                            <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                <rect x="3" y="3" width="7" height="7"/>
+                                <rect x="14" y="3" width="7" height="7"/>
+                                <rect x="14" y="14" width="7" height="7"/>
+                                <path d="M3 14h7v7H3z"/>
+                                <path d="M10 10h4v4h-4z"/>
+                            </svg>
+                        </div>
+                        <div class="qr-info">
+                            <p class="qr-branding">ACCEPTED HERE</p>
+                            <p class="qr-instruction">Scan & Pay Using PhonePe App</p>
+                            <p class="qr-payee">Payee: DENNI MUTHU</p>
+                            <p class="qr-upi">UPI: 9789051375@axl</p>
+                        </div>
+                    </div>
+                    <p class="qr-note">Note: QR is a fallback. Use UPI button for dynamic amount.</p>
+                </div>
+            </div>
+
+            <!-- Payment Status -->
+            <div class="payment-status">
+                <label>Payment Status</label>
+                <div class="status-badge" id="paymentStatus">Pending</div>
+            </div>
+
+            <!-- Submit Button -->
+            <button type="submit" class="btn btn-success btn-full">Save Application</button>
+            <div class="error-message" id="submitError"></div>
+        </form>
+    </div>
+
+    <!-- View Application Modal -->
+    <div id="viewModal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Application Details</h2>
+                <button class="btn btn-close" id="closeModal">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-body" id="modalBody"></div>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast hidden"></div>
+
+    <!-- Tesseract.js for OCR -->
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
