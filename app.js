@@ -232,31 +232,28 @@ function setupPhotoUpload(inputId, placeholderId, previewId, imgId, retakeBtnId,
 
 // ============================================================
 // UNIFIED DOCUMENT PROCESSING PIPELINE
-// ── Professionally rebuilt for maximum Android compatibility ──
+// ── Single-pass, minimum-memory design ──
 //
-// Why the previous version failed on mobile:
-//   1. createImageBitmap() fails/silently broken on Android WebView < Cr90
-//   2. new ImageData(data, w, h) 3-arg constructor unsupported on old WebView
-//   3. ocrLock never reset on early-return paths → every retry silently ignored
-//   4. EXIF rotation not handled → portrait photos arrive sideways to OCR
-//   5. bestConfidence === 0 check rejected valid low-confidence OCR text
+// The "low memory" error on Android comes from Tesseract's
+// WebAssembly worker. Each Tesseract.recognize() call allocates
+// 40-80 MB inside the WASM heap. Running it 3 times sequentially
+// (as previous versions did) means 120-240 MB total — Android
+// WebView kills the process.
 //
-// This version uses:
-//   FileReader → HTMLImageElement (universally supported since Android 4.4)
-//   EXIF rotation detection + canvas correction
-//   Single canvas, sequential pixel filter attempts
-//   Lock always released via finally
+// This version:
+//   1. Resize image to MAX 1000px longest side before OCR
+//   2. Run Tesseract ONCE on the best-preprocessed version
+//   3. Never run multiple Tesseract calls back-to-back
+//   4. Use URL.createObjectURL (not FileReader dataURL) for preview
+//   5. Release all canvas/blob memory after OCR
 // ============================================================
 
-// OCR processing lock — one scan per document type at a time
+// Lock — one OCR operation at a time, per document slot
 const ocrLock = { aadhaar: false, pan: false };
 
-// Resize to this on the longest side before OCR
-// 1400px = ~8MB canvas buffer, readable text on all modern ID cards
-const MAX_OCR_SIDE = 1400;
-
-// Tesseract confidence above which we stop trying more filter passes
-const CONFIDENCE_STOP = 68;
+// 1000px longest side = ~4MB canvas buffer
+// Still reads 12-digit Aadhaar numbers and 10-char PAN clearly
+const MAX_OCR_SIDE = 1000;
 
 async function processDocument(file, type) {
     logDebug('processDocument', {
@@ -270,9 +267,9 @@ async function processDocument(file, type) {
         return;
     }
 
-    // Lock — prevents duplicate concurrent OCR for the same slot
+    // Prevent duplicate concurrent OCR
     if (ocrLock[type]) {
-        logDebug('Already processing', type, '— skipping duplicate');
+        logDebug('Already processing ' + type + ' — ignoring duplicate');
         return;
     }
     ocrLock[type] = true;
@@ -284,263 +281,218 @@ async function processDocument(file, type) {
     let canvas = null;
 
     try {
-        // ── Step 1: Decode via FileReader + Image element ──
-        // This is the ONLY path guaranteed to work on all Android versions.
-        // createImageBitmap is intentionally NOT used here.
-        const { img: imgEl, dataUrl } = await loadImageFromFile(file);
+        // ── Step 1: Load image via Image element (works on all Android) ──
+        // We use URL.createObjectURL — it does NOT base64-encode the whole
+        // file into memory the way FileReader.readAsDataURL does.
+        const imgEl = await loadImageElement(file);
 
-        logDebug('Image loaded', {
-            naturalW: imgEl.naturalWidth,
-            naturalH: imgEl.naturalHeight
+        logDebug('Image decoded', {
+            w: imgEl.naturalWidth,
+            h: imgEl.naturalHeight
         });
 
         if (!imgEl.naturalWidth || !imgEl.naturalHeight) {
-            showOcrMessage(type, 'Could not read the image. Please retake the photo.', 'error');
+            showOcrMessage(type, 'Could not decode the image. Please retake.', 'error');
             return;
         }
 
-        // ── Step 2: Detect EXIF orientation from raw bytes ──
-        // Android camera photos are often stored rotated 90° in JPEG EXIF.
-        // Without correction Tesseract reads sideways text → garbage output.
+        // ── Step 2: EXIF orientation ──
         const orientation = await getExifOrientation(file);
         logDebug('EXIF orientation', orientation);
 
-        // ── Step 3: Draw onto a correctly-oriented, scaled canvas ──
-        canvas = drawOrientedAndScaled(imgEl, orientation, MAX_OCR_SIDE);
+        // ── Step 3: Draw onto a single correctly-oriented, scaled canvas ──
+        canvas = drawOrientedCanvas(imgEl, orientation, MAX_OCR_SIDE);
+
+        // imgEl src object URL is revoked inside loadImageElement after load
+        // Nothing else holds a reference to the full-res data now
 
         if (!canvas) {
-            showOcrMessage(type, 'Could not process the image. Please retake the photo.', 'error');
+            showOcrMessage(type, 'Could not process image. Please retake.', 'error');
             return;
         }
 
-        logDebug('Canvas ready', { w: canvas.width, h: canvas.height });
+        logDebug('Canvas size', { w: canvas.width, h: canvas.height });
 
-        // ── Step 4: Stale-scan guard ──
-        if ((type === 'aadhaar' ? aadhaarScanId : panScanId) !== scanId) {
-            logDebug('Stale scan after image load');
-            return;
+        if ((type === 'aadhaar' ? aadhaarScanId : panScanId) !== scanId) return;
+
+        showOcrMessage(type, 'Enhancing image…', 'info');
+
+        // ── Step 4: Apply HIGH CONTRAST filter once, in-place ──
+        // One filter pass. No multiple copies. No retry loop.
+        // High-contrast grayscale is the single best choice for
+        // printed Indian ID card text under mixed lighting.
+        const ctx      = canvas.getContext('2d');
+        const imgData  = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        applyHighContrast(imgData.data);
+        ctx.putImageData(imgData, 0, 0);
+        // imgData is now eligible for GC
+
+        // ── Step 5: Get a single Blob — no base64, no toDataURL ──
+        let blob;
+        try {
+            blob = await canvasToBlob(canvas, 'image/jpeg', 0.85);
+        } catch (e) {
+            // Fallback: toDataURL (slightly more memory but universally supported)
+            blob = dataURLtoBlob(canvas.toDataURL('image/jpeg', 0.85));
         }
 
-        showOcrMessage(type, 'Reading document…', 'info');
+        // Release canvas backing store immediately — Tesseract has the blob now
+        canvas.width  = 0;
+        canvas.height = 0;
+        canvas        = null;
 
-        // ── Step 5: Take a pixel snapshot of the clean, oriented image ──
-        // We store this once and copy it back before each filter pass
-        // so we never need to re-decode the file.
-        const ctx = canvas.getContext('2d');
-        const basePixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const w = canvas.width;
-        const h = canvas.height;
+        logDebug('Blob ready', { sizeKB: Math.round(blob.size / 1024) });
 
-        // ── Step 6: Sequential OCR attempts with different pixel filters ──
-        // Order chosen for Indian ID cards: high-contrast first (handles most cases),
-        // then threshold (low light), then original (already-clear images).
-        const attempts = [
-            { name: 'highContrast', fn: applyHighContrast },
-            { name: 'threshold',    fn: applyThreshold    },
-            { name: 'original',     fn: null              }
-        ];
+        if ((type === 'aadhaar' ? aadhaarScanId : panScanId) !== scanId) return;
 
-        let bestText       = '';
-        let bestConfidence = -1;
+        showOcrMessage(type, 'Reading text…', 'info');
 
-        for (const attempt of attempts) {
-            if ((type === 'aadhaar' ? aadhaarScanId : panScanId) !== scanId) {
-                logDebug('Stale scan mid-loop');
-                return;
-            }
-
-            // Copy clean pixels into a working buffer
-            const workBuf = new Uint8ClampedArray(basePixels.data);
-            if (attempt.fn) attempt.fn(workBuf);
-
-            // Put the working pixels onto the canvas
-            // putImageData accepts a plain Uint8ClampedArray in all browsers
-            ctx.putImageData(new ImageData(workBuf, w, h), 0, 0);
-
-            // Blob — avoids huge base64 strings in memory
-            let blob;
-            try {
-                blob = await canvasToBlob(canvas, 'image/jpeg', 0.9);
-            } catch (blobErr) {
-                logDebug('toBlob failed, trying toDataURL fallback');
-                // toDataURL is heavier but works everywhere
-                const dataURL = canvas.toDataURL('image/jpeg', 0.9);
-                blob = dataURLtoBlob(dataURL);
-            }
-
-            logDebug(`${attempt.name} blob: ${Math.round(blob.size / 1024)} KB`);
-
-            // Run OCR
-            let result;
-            try {
-                result = await Tesseract.recognize(blob, 'eng', {
-                    logger: (m) => {
-                        if (m.status === 'recognizing text') {
-                            const cur = type === 'aadhaar' ? aadhaarScanId : panScanId;
-                            if (cur === scanId) {
-                                showOcrMessage(type,
-                                    `Reading… ${Math.round(m.progress * 100)}%`, 'info');
-                            }
+        // ── Step 6: ONE Tesseract call ──
+        let result;
+        try {
+            result = await Tesseract.recognize(blob, 'eng', {
+                logger: (m) => {
+                    if (m.status === 'recognizing text') {
+                        const cur = type === 'aadhaar' ? aadhaarScanId : panScanId;
+                        if (cur === scanId) {
+                            showOcrMessage(type,
+                                'Reading text… ' + Math.round(m.progress * 100) + '%',
+                                'info');
                         }
                     }
-                });
-            } catch (ocrErr) {
-                logDebug(`Tesseract failed on "${attempt.name}"`, ocrErr.message);
-                continue;
-            }
-
-            const conf = typeof result.data.confidence === 'number'
-                ? result.data.confidence : 0;
-            const text = result.data.text || '';
-
-            logDebug(`"${attempt.name}" conf=${conf} textLen=${text.length}`);
-
-            // Keep the best result regardless of confidence score —
-            // Tesseract sometimes reports low confidence but extracted text is correct
-            if (conf > bestConfidence || (conf === bestConfidence && text.length > bestText.length)) {
-                bestConfidence = conf;
-                bestText       = text;
-            }
-
-            // Early exit if confidence is good enough
-            if (conf >= CONFIDENCE_STOP) {
-                logDebug('Good confidence, stopping early');
-                break;
-            }
-        }
-
-        // ── Step 7: Final stale check ──
-        if ((type === 'aadhaar' ? aadhaarScanId : panScanId) !== scanId) {
-            logDebug('Stale scan after OCR');
-            return;
-        }
-
-        logDebug('OCR done', { confidence: bestConfidence, textLen: bestText.length });
-
-        // Even if confidence is 0, attempt extraction — the text may still contain the number
-        if (!bestText || bestText.trim().length < 3) {
+                }
+            });
+        } catch (ocrErr) {
+            logDebug('Tesseract.recognize failed', ocrErr.message || String(ocrErr));
             showOcrMessage(type,
-                'Could not read text from the image. Please retake with the card filling most of the frame.',
+                'OCR failed. Please retake the photo in good lighting with the card clearly visible.',
                 'error');
             return;
         }
 
-        if (type === 'aadhaar') extractAadhaarDetails(bestText, bestConfidence);
-        else                    extractPanDetails(bestText, bestConfidence);
+        // blob goes out of scope here → GC-eligible
+
+        if ((type === 'aadhaar' ? aadhaarScanId : panScanId) !== scanId) return;
+
+        const text = (result && result.data && result.data.text) ? result.data.text : '';
+        const conf = (result && result.data && typeof result.data.confidence === 'number')
+            ? result.data.confidence : 0;
+
+        logDebug('OCR result', { conf, textLen: text.length });
+
+        if (!text || text.trim().length < 3) {
+            showOcrMessage(type,
+                'No text detected. Retake with the card filling most of the frame in good light.',
+                'error');
+            return;
+        }
+
+        // ── Step 7: Extract and auto-fill ──
+        if (type === 'aadhaar') extractAadhaarDetails(text, conf);
+        else                    extractPanDetails(text, conf);
 
     } catch (err) {
         const msg = (err && err.message) ? err.message.toLowerCase() : '';
-        logDebug('processDocument error', err.message || String(err));
-        if (msg.includes('memory') || msg.includes('quota') || msg.includes('oom')) {
+        logDebug('processDocument caught', err.message || String(err));
+
+        if (msg.includes('memory') || msg.includes('quota') || msg.includes('oom') ||
+            msg.includes('previous operation')) {
             showOcrMessage(type,
-                'Image too large for this device. Retake the photo closer to the card.', 'error');
+                'Not enough memory on this device. Please close other apps and try again.',
+                'error');
         } else {
             showOcrMessage(type,
-                'Could not process the document. Please retake the photo or enter details manually.',
+                'Could not process the document. Please retake in good lighting.',
                 'error');
         }
     } finally {
-        // ALWAYS release canvas memory and the lock
         if (canvas) {
             canvas.width  = 0;
             canvas.height = 0;
             canvas = null;
         }
         ocrLock[type] = false;
-        logDebug('Lock released for', type);
+        logDebug('Lock released', type);
     }
 }
 
 // ============================================================
-// Load a File into an HTMLImageElement via FileReader
-// Works on every Android version — no createImageBitmap needed
+// Load image using URL.createObjectURL + HTMLImageElement
+// This does NOT read the entire file as base64 into JS heap —
+// the browser streams it directly from the Blob URL.
 // ============================================================
-function loadImageFromFile(file) {
+function loadImageElement(file) {
     return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onerror = () => reject(new Error('FileReader failed'));
-        reader.onload  = (e) => {
-            const dataUrl = e.target.result;
-            const imgEl   = new Image();
-            imgEl.onerror = () => reject(new Error('Image decode failed'));
-            imgEl.onload  = () => resolve({ img: imgEl, dataUrl });
-            imgEl.src     = dataUrl;
-        };
-        reader.readAsDataURL(file);
+        const url   = URL.createObjectURL(file);
+        const imgEl = new Image();
+        imgEl.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Image load failed')); };
+        imgEl.onload  = () => { URL.revokeObjectURL(url); resolve(imgEl); };
+        imgEl.src     = url;
     });
 }
 
 // ============================================================
 // EXIF Orientation Reader
-// Mobile cameras encode rotation in JPEG EXIF tag 0x0112.
-// Without correction, a portrait shot arrives as a landscape
-// image rotated 90° — Tesseract reads vertical text → garbage.
+// Reads only first 64KB of the JPEG — EXIF is always at the start
 // ============================================================
 function getExifOrientation(file) {
     return new Promise((resolve) => {
-        // Only JPEG files carry EXIF
-        if (!file.type.includes('jpeg') && !file.type.includes('jpg')) {
-            resolve(1); // no rotation needed
-            return;
-        }
+        const type = (file.type || '').toLowerCase();
+        if (!type.includes('jpeg') && !type.includes('jpg')) { resolve(1); return; }
         const reader = new FileReader();
         reader.onerror = () => resolve(1);
-        reader.onload  = (e) => {
+        reader.onload  = (ev) => {
             try {
-                const view = new DataView(e.target.result);
-                // JPEG SOI marker
+                const view = new DataView(ev.target.result);
                 if (view.getUint16(0) !== 0xFFD8) { resolve(1); return; }
                 let offset = 2;
-                while (offset < view.byteLength) {
+                while (offset + 4 < view.byteLength) {
                     const marker = view.getUint16(offset);
-                    offset += 2;
+                    const segLen = view.getUint16(offset + 2);
                     if (marker === 0xFFE1) {
-                        // APP1 — may contain EXIF
-                        offset += 2; // skip length
-                        if (view.getUint32(offset) !== 0x45786966) { resolve(1); return; } // 'Exif'
-                        offset += 6; // skip 'Exif\0\0'
-                        const little = view.getUint16(offset) === 0x4949;
-                        offset += view.getUint32(offset + 4, little); // IFD offset
-                        const tags = view.getUint16(offset, little);
-                        offset += 2;
-                        for (let t = 0; t < tags; t++) {
-                            if (view.getUint16(offset + t * 12, little) === 0x0112) {
-                                resolve(view.getUint16(offset + t * 12 + 8, little));
+                        if (view.byteLength < offset + 10) { resolve(1); return; }
+                        if (view.getUint32(offset + 4) !== 0x45786966) { resolve(1); return; }
+                        const tiffBase = offset + 10;
+                        const little   = view.getUint16(tiffBase) === 0x4949;
+                        const ifdOff   = view.getUint32(tiffBase + 4, little);
+                        const ifdStart = tiffBase + ifdOff;
+                        if (ifdStart + 2 > view.byteLength) { resolve(1); return; }
+                        const numTags  = view.getUint16(ifdStart, little);
+                        for (let i = 0; i < numTags; i++) {
+                            const tagOff = ifdStart + 2 + i * 12;
+                            if (tagOff + 12 > view.byteLength) break;
+                            if (view.getUint16(tagOff, little) === 0x0112) {
+                                resolve(view.getUint16(tagOff + 8, little));
                                 return;
                             }
                         }
                         resolve(1); return;
-                    } else if ((marker & 0xFF00) !== 0xFF00) {
-                        resolve(1); return;
-                    } else {
-                        offset += view.getUint16(offset);
                     }
+                    offset += 2 + segLen;
+                    if ((marker & 0xFF00) !== 0xFF00) break;
                 }
-            } catch (_) { /* ignore parse errors */ }
+            } catch (_) {}
             resolve(1);
         };
-        // Read only the first 128KB — EXIF is always at the start
-        reader.readAsArrayBuffer(file.slice(0, 131072));
+        reader.readAsArrayBuffer(file.slice(0, 65536));
     });
 }
 
 // ============================================================
-// Draw the image onto a canvas with EXIF rotation corrected
-// and scaled to MAX_OCR_SIDE on the longest dimension
+// Draw image onto canvas with EXIF rotation applied + scaled
 // ============================================================
-function drawOrientedAndScaled(imgEl, orientation, maxSide) {
+function drawOrientedCanvas(imgEl, orientation, maxSide) {
     try {
         const srcW = imgEl.naturalWidth;
         const srcH = imgEl.naturalHeight;
 
-        // Orientations 5-8 swap width/height (portrait ↔ landscape)
-        const swapAxes = orientation >= 5;
-        const logicalW = swapAxes ? srcH : srcW;
-        const logicalH = swapAxes ? srcW : srcH;
+        const swap   = orientation >= 5;
+        const logicW = swap ? srcH : srcW;
+        const logicH = swap ? srcW : srcH;
 
-        const scale = Math.min(1, maxSide / Math.max(logicalW, logicalH));
-        const outW   = Math.round(logicalW * scale);
-        const outH   = Math.round(logicalH * scale);
+        const scale = Math.min(1, maxSide / Math.max(logicW, logicH));
+        const outW  = Math.round(logicW * scale);
+        const outH  = Math.round(logicH * scale);
 
         const c   = document.createElement('canvas');
         c.width   = outW;
@@ -548,60 +500,36 @@ function drawOrientedAndScaled(imgEl, orientation, maxSide) {
         const ctx = c.getContext('2d');
         if (!ctx) return null;
 
-        // Apply the EXIF transform so text is right-side-up for Tesseract
         ctx.save();
         switch (orientation) {
-            case 2: ctx.transform(-1,  0,  0,  1, outW, 0);       break;
-            case 3: ctx.transform(-1,  0,  0, -1, outW, outH);     break;
-            case 4: ctx.transform( 1,  0,  0, -1, 0,    outH);     break;
-            case 5: ctx.transform( 0,  1,  1,  0, 0,    0);        break;
-            case 6: ctx.transform( 0,  1, -1,  0, outH, 0);        break;
-            case 7: ctx.transform( 0, -1, -1,  0, outH, outW);     break;
-            case 8: ctx.transform( 0, -1,  1,  0, 0,    outW);     break;
-            default: break; // orientation 1 — no transform
+            case 2: ctx.transform(-1, 0,  0,  1, outW, 0);     break;
+            case 3: ctx.transform(-1, 0,  0, -1, outW, outH);   break;
+            case 4: ctx.transform( 1, 0,  0, -1, 0,    outH);   break;
+            case 5: ctx.transform( 0, 1,  1,  0, 0,    0);      break;
+            case 6: ctx.transform( 0, 1, -1,  0, outH, 0);      break;
+            case 7: ctx.transform( 0,-1, -1,  0, outH, outW);   break;
+            case 8: ctx.transform( 0,-1,  1,  0, 0,    outW);   break;
+            default: break;
         }
-
-        // Draw the source image scaled to the output canvas
-        if (swapAxes) {
-            ctx.drawImage(imgEl, 0, 0, srcW, srcH, 0, 0, outH, outW);
-        } else {
-            ctx.drawImage(imgEl, 0, 0, srcW, srcH, 0, 0, outW, outH);
-        }
-
+        ctx.drawImage(imgEl, 0, 0, srcW, srcH, 0, 0,
+            swap ? outH : outW, swap ? outW : outH);
         ctx.restore();
         return c;
-    } catch (err) {
-        logDebug('drawOrientedAndScaled error', err.message);
+    } catch (e) {
+        logDebug('drawOrientedCanvas error', e.message);
         return null;
     }
 }
 
 // ============================================================
-// In-place pixel filters — modify Uint8ClampedArray directly
+// High-contrast grayscale — single best filter for Indian IDs
 // ============================================================
-
-// High-contrast grayscale — best first-pass for Indian ID cards
 function applyHighContrast(d) {
     const factor = (259 * (1.9 + 255)) / (255 * (259 - 1.9));
     for (let i = 0; i < d.length; i += 4) {
         const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
         const e = Math.max(0, Math.min(255, factor * (g - 128) + 128));
         d[i] = d[i + 1] = d[i + 2] = e;
-    }
-}
-
-// Adaptive binarise — helps with shadows, glare, uneven lighting
-function applyThreshold(d) {
-    let sum = 0;
-    const n = d.length / 4;
-    for (let i = 0; i < d.length; i += 4) {
-        sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-    }
-    const thr = (sum / n) * 0.84;
-    for (let i = 0; i < d.length; i += 4) {
-        const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-        const b = g > thr ? 255 : 0;
-        d[i] = d[i + 1] = d[i + 2] = b;
     }
 }
 
@@ -618,12 +546,12 @@ function canvasToBlob(canvas, mimeType, quality) {
 }
 
 // ============================================================
-// dataURL → Blob fallback (for browsers where toBlob fails)
+// dataURL → Blob fallback
 // ============================================================
 function dataURLtoBlob(dataURL) {
-    const [header, data] = dataURL.split(',');
-    const mime   = header.match(/:(.*?);/)[1];
-    const binary = atob(data);
+    const parts  = dataURL.split(',');
+    const mime   = parts[0].match(/:(.*?);/)[1];
+    const binary = atob(parts[1]);
     const buf    = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) buf[i] = binary.charCodeAt(i);
     return new Blob([buf], { type: mime });
