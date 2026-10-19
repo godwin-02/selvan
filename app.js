@@ -96,6 +96,30 @@ function setupEventListeners() {
         'panPreviewImg', 'retakePan', 'pan'
     );
 
+    // Also wire the camera inputs (separate inputs with capture="environment")
+    mirrorInputToMain('aadhaarPhotoCamera', 'aadhaarPhoto');
+    mirrorInputToMain('panPhotoCamera',     'panPhoto');
+
+    // Camera buttons → open dedicated camera input
+    document.getElementById('aadhaarCameraBtn').addEventListener('click', () => {
+        document.getElementById('aadhaarPhotoCamera').value = '';
+        document.getElementById('aadhaarPhotoCamera').click();
+    });
+    document.getElementById('panCameraBtn').addEventListener('click', () => {
+        document.getElementById('panPhotoCamera').value = '';
+        document.getElementById('panPhotoCamera').click();
+    });
+
+    // Upload buttons → open gallery/file input (no capture attr)
+    document.getElementById('aadhaarUploadBtn').addEventListener('click', () => {
+        document.getElementById('aadhaarPhoto').value = '';
+        document.getElementById('aadhaarPhoto').click();
+    });
+    document.getElementById('panUploadBtn').addEventListener('click', () => {
+        document.getElementById('panPhoto').value = '';
+        document.getElementById('panPhoto').click();
+    });
+
     // Scan buttons — if file already loaded run OCR immediately,
     // otherwise open the camera/file picker and OCR will auto-start on capture
     document.getElementById('scanAadhaarBtn').addEventListener('click', () => {
@@ -151,6 +175,30 @@ function setupEventListeners() {
 }
 
 // ============================================================
+// Mirror a camera input's file selection into the main input
+// so the existing setupPhotoUpload pipeline handles both paths
+// ============================================================
+function mirrorInputToMain(cameraInputId, mainInputId) {
+    const camInput  = document.getElementById(cameraInputId);
+    const mainInput = document.getElementById(mainInputId);
+    if (!camInput || !mainInput) return;
+
+    camInput.addEventListener('change', () => {
+        if (!camInput.files || !camInput.files[0]) return;
+        // Dispatch the file through the main input's change handler
+        // by using a DataTransfer object (supported in all modern browsers)
+        try {
+            const dt = new DataTransfer();
+            dt.items.add(camInput.files[0]);
+            mainInput.files = dt.files;
+        } catch (_) {
+            // DataTransfer not supported — fall back to firing directly
+        }
+        mainInput.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+}
+
+// ============================================================
 // Photo Upload Setup
 // Stores the actual File/Blob and immediately auto-starts OCR
 // ============================================================
@@ -166,13 +214,15 @@ function setupPhotoUpload(inputId, placeholderId, previewId, imgId, retakeBtnId,
         return;
     }
 
-    // Clicking the placeholder or the retake button triggers the native file/camera picker
-    placeholder.addEventListener('click', () => input.click());
+    // Clicking the placeholder opens the gallery/file picker (no camera lock)
+    placeholder.addEventListener('click', () => {
+        input.value = '';
+        input.click();
+    });
     retakeBtn.addEventListener('click', () => {
-        // Clear current file so a retake truly replaces it
         if (docType === 'aadhaar') aadhaarFile = null;
         else panFile = null;
-        input.value = '';   // reset so same file can be re-selected
+        input.value = '';
         input.click();
     });
 

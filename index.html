@@ -102,28 +102,49 @@
             <div class="form-group">
                 <label>Aadhaar Card Photo</label>
                 <div class="photo-upload" id="aadhaarPhotoUpload">
-                    <input type="file" id="aadhaarPhoto" accept="image/*" capture="environment" hidden>
+                    <!-- No capture attribute — lets user choose camera OR gallery on mobile -->
+                    <input type="file" id="aadhaarPhoto" accept="image/*" hidden>
+                    <!-- Separate camera input — only opened when user taps Camera button -->
+                    <input type="file" id="aadhaarPhotoCamera" accept="image/*" capture="environment" hidden>
                     <div class="photo-placeholder" id="aadhaarPhotoPlaceholder">
                         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
                             <circle cx="12" cy="13" r="4"/>
                         </svg>
-                        <p>Tap to take photo or select</p>
+                        <p>Take a photo or upload from gallery</p>
                     </div>
                     <div class="photo-preview hidden" id="aadhaarPhotoPreview">
                         <img id="aadhaarPreviewImg" alt="Aadhaar preview">
                         <button type="button" class="btn btn-retake" id="retakeAadhaar">Retake / Change</button>
                     </div>
                 </div>
-                <button type="button" class="btn btn-secondary btn-small" id="scanAadhaarBtn">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M3 7V5a2 2 0 0 1 2-2h2"/>
-                        <path d="M17 3h2a2 2 0 0 1 2 2v2"/>
-                        <path d="M21 17v2a2 2 0 0 1-2 2h-2"/>
-                        <path d="M7 21H5a2 2 0 0 1-2-2v-2"/>
-                    </svg>
-                    Scan Aadhaar & Auto Fill
-                </button>
+                <!-- Two clear action buttons -->
+                <div class="upload-actions">
+                    <button type="button" class="btn btn-upload-cam" id="aadhaarCameraBtn">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                            <circle cx="12" cy="13" r="4"/>
+                        </svg>
+                        Camera
+                    </button>
+                    <button type="button" class="btn btn-upload-file" id="aadhaarUploadBtn">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        Upload Image
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-small" id="scanAadhaarBtn">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M3 7V5a2 2 0 0 1 2-2h2"/>
+                            <path d="M17 3h2a2 2 0 0 1 2 2v2"/>
+                            <path d="M21 17v2a2 2 0 0 1-2 2h-2"/>
+                            <path d="M7 21H5a2 2 0 0 1-2-2v-2"/>
+                        </svg>
+                        Scan & Auto Fill
+                    </button>
+                </div>
                 <div class="ocr-message" id="aadhaarOcrMessage"></div>
             </div>
 
@@ -138,28 +159,46 @@
             <div class="form-group">
                 <label>PAN Card Photo</label>
                 <div class="photo-upload" id="panPhotoUpload">
-                    <input type="file" id="panPhoto" accept="image/*" capture="environment" hidden>
+                    <input type="file" id="panPhoto" accept="image/*" hidden>
+                    <input type="file" id="panPhotoCamera" accept="image/*" capture="environment" hidden>
                     <div class="photo-placeholder" id="panPhotoPlaceholder">
                         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
                             <circle cx="12" cy="13" r="4"/>
                         </svg>
-                        <p>Tap to take photo or select</p>
+                        <p>Take a photo or upload from gallery</p>
                     </div>
                     <div class="photo-preview hidden" id="panPhotoPreview">
                         <img id="panPreviewImg" alt="PAN preview">
                         <button type="button" class="btn btn-retake" id="retakePan">Retake / Change</button>
                     </div>
                 </div>
-                <button type="button" class="btn btn-secondary btn-small" id="scanPanBtn">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M3 7V5a2 2 0 0 1 2-2h2"/>
-                        <path d="M17 3h2a2 2 0 0 1 2 2v2"/>
-                        <path d="M21 17v2a2 2 0 0 1-2 2h-2"/>
-                        <path d="M7 21H5a2 2 0 0 1-2-2v-2"/>
-                    </svg>
-                    Scan PAN & Auto Fill
-                </button>
+                <div class="upload-actions">
+                    <button type="button" class="btn btn-upload-cam" id="panCameraBtn">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                            <circle cx="12" cy="13" r="4"/>
+                        </svg>
+                        Camera
+                    </button>
+                    <button type="button" class="btn btn-upload-file" id="panUploadBtn">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        Upload Image
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-small" id="scanPanBtn">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M3 7V5a2 2 0 0 1 2-2h2"/>
+                            <path d="M17 3h2a2 2 0 0 1 2 2v2"/>
+                            <path d="M21 17v2a2 2 0 0 1-2 2h-2"/>
+                            <path d="M7 21H5a2 2 0 0 1-2-2v-2"/>
+                        </svg>
+                        Scan & Auto Fill
+                    </button>
+                </div>
                 <div class="ocr-message" id="panOcrMessage"></div>
             </div>
 
@@ -224,7 +263,7 @@
             <div class="modal-body payment-modal-body">
                 <div class="payment-detail-row">
                     <label>Payee</label>
-                    <p class="payment-value">DENNI MUTHU</p>
+                    <p class="payment-value"> HDB Finance </p>
                 </div>
                 <div class="payment-detail-row">
                     <label>UPI ID</label>

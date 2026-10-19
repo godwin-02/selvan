@@ -1166,3 +1166,57 @@ body {
         font-size: 1.125rem;
     }
 }
+
+/* ============================================================
+   Upload action buttons — Camera | Upload Image | Scan
+   ============================================================ */
+.upload-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 0.625rem;
+}
+
+.btn-upload-cam,
+.btn-upload-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.6rem 1rem;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: 0.875rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.1s;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    min-height: 44px;
+}
+
+.btn-upload-cam {
+    background: #0ea5e9;
+    color: #fff;
+}
+.btn-upload-cam:hover { background: #0284c7; }
+.btn-upload-cam:active { transform: scale(0.97); }
+
+.btn-upload-file {
+    background: var(--success);
+    color: #fff;
+}
+.btn-upload-file:hover { background: var(--success-dark); }
+.btn-upload-file:active { transform: scale(0.97); }
+
+/* Make all three buttons equal-width on mobile */
+@media (max-width: 480px) {
+    .upload-actions {
+        flex-direction: column;
+    }
+    .upload-actions .btn,
+    .upload-actions .btn-upload-cam,
+    .upload-actions .btn-upload-file {
+        width: 100%;
+        justify-content: center;
+    }
+}
