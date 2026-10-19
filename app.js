@@ -232,16 +232,32 @@ function setupPhotoUpload(inputId, placeholderId, previewId, imgId, retakeBtnId,
 
 // ============================================================
 // UNIFIED DOCUMENT PROCESSING PIPELINE
-// Both desktop file-picker and mobile camera feed into here.
-// file  — the actual File / Blob object
-// type  — 'aadhaar' | 'pan'
+// ── Memory-safe sequential design ──
+//
+// OLD (broken on mobile): 4 canvases × 16 MB each = ~150 MB peak
+// NEW: 1 reused canvas, processed and freed before next attempt
+//
+// Pipeline per scan attempt:
+//   File → ImageBitmap → ONE canvas (scaled) → Blob → OCR
+//   If confidence OK → done, canvas freed
+//   If not → reuse same canvas, apply next filter → Blob → OCR
 // ============================================================
+
+// OCR processing lock — prevents duplicate concurrent OCR calls
+const ocrLock = { aadhaar: false, pan: false };
+
+// Max dimension for OCR canvas — balances text legibility vs memory
+// 1600px on longest side ≈ 4 MB canvas buffer vs 48+ MB at full 6K resolution
+const MAX_OCR_SIDE = 1600;
+
+// Confidence threshold above which we stop trying more versions
+const CONFIDENCE_STOP = 72;
+
 async function processDocument(file, type) {
     logDebug('processDocument called', {
         type,
-        fileExists: !!file,
         fileType: file ? file.type : 'none',
-        fileSize: file ? file.size : 0
+        fileSizeKB: file ? Math.round(file.size / 1024) : 0
     });
 
     if (!file || file.size === 0) {
@@ -249,55 +265,136 @@ async function processDocument(file, type) {
         return;
     }
 
-    // Bump scan ID so older runs can't overwrite a newer result
+    // ── Processing lock: cancel duplicate calls ──
+    if (ocrLock[type]) {
+        logDebug('OCR already running for', type, '— ignoring duplicate call');
+        return;
+    }
+    ocrLock[type] = true;
+
+    // Bump scan ID so any in-flight stale run is discarded
     const scanId = type === 'aadhaar' ? ++aadhaarScanId : ++panScanId;
 
     showOcrMessage(type, 'Validating image…', 'info');
 
+    // Single reusable canvas — created once, freed at the end
+    let canvas = null;
+    let ctx    = null;
+
     try {
-        // ── Step 1: Validate image can be decoded ──
-        let imageBitmap;
+        // ── Step 1: Decode image into an ImageBitmap (GPU-decoded, no base64) ──
+        let bitmap;
         try {
-            imageBitmap = await createImageBitmap(file);
-            logDebug('Image decoded OK', { width: imageBitmap.width, height: imageBitmap.height });
+            bitmap = await createImageBitmap(file);
         } catch (err) {
-            logDebug('createImageBitmap failed', err);
+            logDebug('createImageBitmap failed', err.message);
             showOcrMessage(type, 'Unable to read the captured image. Please retake the photo.', 'error');
             return;
         }
 
-        if (!imageBitmap.width || !imageBitmap.height) {
-            showOcrMessage(type, 'Image dimensions are invalid. Please retake the photo.', 'error');
+        const srcW = bitmap.width;
+        const srcH = bitmap.height;
+
+        if (!srcW || !srcH) {
+            bitmap.close();
+            showOcrMessage(type, 'Invalid image dimensions. Please retake the photo.', 'error');
             return;
         }
 
-        showOcrMessage(type, 'Processing document…', 'info');
+        // ── Step 2: Calculate target dimensions — ONE resize, never upsample ──
+        const scale = Math.min(1, MAX_OCR_SIDE / Math.max(srcW, srcH));
+        const tW    = Math.round(srcW * scale);
+        const tH    = Math.round(srcH * scale);
 
-        // ── Step 2: Preprocess — orientation + OCR-friendly versions ──
-        const versions = await buildOcrVersions(imageBitmap);
-        imageBitmap.close(); // release GPU memory
+        logDebug('Image dimensions', {
+            original: `${srcW}×${srcH}`,
+            target:   `${tW}×${tH}`,
+            scale:    scale.toFixed(3),
+            originalSizeKB: Math.round(file.size / 1024)
+        });
 
-        // ── Step 3: Stale-scan guard — check if a newer scan started ──
-        const currentId = type === 'aadhaar' ? aadhaarScanId : panScanId;
-        if (scanId !== currentId) {
-            logDebug('Stale scan discarded', { scanId, currentId });
+        // ── Step 3: Create ONE canvas at target size ──
+        canvas = document.createElement('canvas');
+        canvas.width  = tW;
+        canvas.height = tH;
+        ctx = canvas.getContext('2d');
+
+        // Draw the decoded bitmap into the canvas (scaled down in one pass)
+        ctx.drawImage(bitmap, 0, 0, tW, tH);
+
+        // Release the ImageBitmap immediately — no longer needed
+        bitmap.close();
+        bitmap = null;
+
+        // ── Step 3b: Capture the raw scaled pixels as a snapshot ──
+        // We store this once so every OCR attempt can restore a clean
+        // version of the image without re-decoding the original file.
+        // This avoids createImageBitmap(file, {resize…}) which is
+        // NOT supported in Android WebView / mobile Chrome.
+        const rawPixels = ctx.getImageData(0, 0, tW, tH);
+
+        // ── Step 4: Check stale scan ──
+        if ((type === 'aadhaar' ? aadhaarScanId : panScanId) !== scanId) {
+            logDebug('Stale scan after decode, discarding');
             return;
         }
 
-        showOcrMessage(type, 'Reading document with OCR…', 'info');
+        showOcrMessage(type, 'Reading document…', 'info');
 
-        // ── Step 4: Try OCR on preprocessed versions, best-confidence wins ──
-        let bestResult = null;
+        // ── Step 5: Sequential OCR attempts — ONE blob in memory at a time ──
+        // Attempt 1: High-contrast grayscale  — best for Aadhaar/PAN on mobile
+        // Attempt 2: Adaptive threshold       — helps with uneven lighting
+        // Attempt 3: Raw resized original     — plain fallback
+        //
+        // For each attempt:
+        //   1. Restore clean raw pixels onto the canvas
+        //   2. Apply filter in-place (no extra array allocation)
+        //   3. canvas.toBlob → OCR
+        //   4. Blob goes out of scope → GC-eligible before next attempt
+
+        const attempts = [
+            { name: 'highContrast', applyFn: applyHighContrast },
+            { name: 'threshold',    applyFn: applyThreshold    },
+            { name: 'original',     applyFn: null              }
+        ];
+
+        let bestText       = '';
         let bestConfidence = 0;
+        let attemptsDone   = 0;
 
-        for (const v of versions) {
-            logDebug(`Trying OCR version: ${v.name}`);
+        for (const attempt of attempts) {
+            // Guard: bail if a newer scan has started
+            if ((type === 'aadhaar' ? aadhaarScanId : panScanId) !== scanId) {
+                logDebug('Stale scan mid-loop, discarding');
+                return;
+            }
 
+            logDebug(`OCR attempt: ${attempt.name}`);
+
+            // Restore clean raw pixels (copy of rawPixels.data into a new ImageData)
+            // This overwrites any filter applied in the previous iteration
+            const workingData = new ImageData(
+                new Uint8ClampedArray(rawPixels.data), tW, tH
+            );
+
+            if (attempt.applyFn) {
+                attempt.applyFn(workingData.data);
+            }
+
+            ctx.putImageData(workingData, 0, 0);
+            // workingData is now GC-eligible (canvas has its own copy)
+
+            // Convert canvas to Blob — NO base64, much lower memory
+            const blob = await canvasToBlob(canvas, 'image/jpeg', 0.88);
+
+            logDebug(`${attempt.name} blob size: ${Math.round(blob.size / 1024)} KB`);
+
+            // Run OCR on this single Blob
+            let result;
             try {
-                const result = await Tesseract.recognize(v.blob, 'eng', {
+                result = await Tesseract.recognize(blob, 'eng', {
                     logger: (m) => {
                         if (m.status === 'recognizing text') {
-                            // Check scan is still current before updating UI
                             const cId = type === 'aadhaar' ? aadhaarScanId : panScanId;
                             if (scanId === cId) {
                                 showOcrMessage(
@@ -309,152 +406,108 @@ async function processDocument(file, type) {
                         }
                     }
                 });
+            } catch (ocrErr) {
+                logDebug(`OCR error on attempt "${attempt.name}"`, ocrErr.message);
+                attemptsDone++;
+                continue;
+            }
 
-                const conf = result.data.confidence || 0;
-                logDebug(`Version "${v.name}" confidence: ${conf}`);
+            attemptsDone++;
+            const conf = result.data.confidence || 0;
+            logDebug(`Confidence for "${attempt.name}": ${conf}`);
 
-                if (conf > bestConfidence) {
-                    bestConfidence = conf;
-                    bestResult = result;
-                }
+            if (conf > bestConfidence) {
+                bestConfidence = conf;
+                bestText       = result.data.text;
+            }
 
-                // Good enough — stop trying other versions
-                if (conf > 70) {
-                    logDebug('Confidence threshold met, stopping early');
-                    break;
-                }
-            } catch (err) {
-                logDebug(`OCR failed for version "${v.name}"`, err.message);
+            // Good enough — stop early, save memory and time
+            if (conf >= CONFIDENCE_STOP) {
+                logDebug('Confidence threshold met, stopping early');
+                break;
             }
         }
 
-        // ── Step 5: Stale-scan guard (after potentially long OCR) ──
-        const currentId2 = type === 'aadhaar' ? aadhaarScanId : panScanId;
-        if (scanId !== currentId2) {
-            logDebug('Stale scan discarded after OCR', { scanId });
+        // ── Step 6: Final stale check ──
+        if ((type === 'aadhaar' ? aadhaarScanId : panScanId) !== scanId) {
+            logDebug('Stale scan after OCR, discarding result');
             return;
         }
 
-        if (!bestResult) {
+        logDebug('OCR finished', {
+            attempts:   attemptsDone,
+            confidence: bestConfidence,
+            textLength: bestText.length
+        });
+
+        if (!bestText || bestConfidence === 0) {
             showOcrMessage(type,
-                'Document captured, but details could not be detected. Please retake the photo or enter manually.',
+                'The image is too unclear to read. Please retake the photo with the card filling most of the frame.',
                 'error');
             return;
         }
 
-        logDebug('OCR complete', { confidence: bestConfidence, chars: bestResult.data.text.length });
-
-        const text = bestResult.data.text;
+        // ── Step 7: Extract details and auto-fill ──
         if (type === 'aadhaar') {
-            extractAadhaarDetails(text, bestConfidence);
+            extractAadhaarDetails(bestText, bestConfidence);
         } else {
-            extractPanDetails(text, bestConfidence);
+            extractPanDetails(bestText, bestConfidence);
         }
 
     } catch (err) {
-        console.error('processDocument error:', err);
-        logDebug('Unexpected error in processDocument', err.message);
-        showOcrMessage(type,
-            'Unable to process the document. Please retake the photo or enter details manually.',
-            'error');
+        // Catch low-memory and other unexpected errors
+        const msg = (err && err.message) ? err.message.toLowerCase() : '';
+        logDebug('processDocument caught error', err.message || err);
+
+        if (msg.includes('memory') || msg.includes('oom') || msg.includes('allocation')) {
+            showOcrMessage(type,
+                'The image is too large to process on this device. Please retake the document photo with the card filling most of the frame.',
+                'error');
+        } else {
+            showOcrMessage(type,
+                'Unable to process the document. Please retake the photo or enter details manually.',
+                'error');
+        }
+    } finally {
+        // ── Always release canvas and unlock ──
+        if (canvas) {
+            // Setting dimensions to 0 releases the backing pixel buffer on most browsers
+            canvas.width  = 0;
+            canvas.height = 0;
+            canvas = null;
+            ctx    = null;
+        }
+        ocrLock[type] = false;
+        logDebug('OCR lock released for', type);
     }
 }
 
 // ============================================================
-// Image Preprocessing — builds multiple OCR-friendly Blobs
-// Handles EXIF orientation for mobile camera photos
+// In-place pixel filters — operate on a single ImageData.data
+// No new arrays allocated — modifies the Uint8ClampedArray directly
 // ============================================================
-async function buildOcrVersions(bitmap) {
-    const MAX_SIDE = 2000;
 
-    // Respect EXIF orientation — for most mobile shots width < height in portrait
-    let srcW = bitmap.width;
-    let srcH = bitmap.height;
-
-    // Scale down while preserving text legibility
-    let w = srcW, h = srcH;
-    if (w > MAX_SIDE) { h = Math.round(h * MAX_SIDE / w); w = MAX_SIDE; }
-    if (h > MAX_SIDE) { w = Math.round(w * MAX_SIDE / h); h = MAX_SIDE; }
-
-    logDebug('Preprocessing dimensions', { src: `${srcW}x${srcH}`, target: `${w}x${h}` });
-
-    // ── Helper: draw bitmap onto a fresh canvas ──
-    function makeCanvas(width, height) {
-        const c = document.createElement('canvas');
-        c.width = width; c.height = height;
-        return c;
-    }
-
-    // ── 1. Original (resized) ──
-    const cOrig = makeCanvas(w, h);
-    cOrig.getContext('2d').drawImage(bitmap, 0, 0, w, h);
-
-    // ── 2. Grayscale ──
-    const cGray = makeCanvas(w, h);
-    const gCtx = cGray.getContext('2d');
-    gCtx.drawImage(bitmap, 0, 0, w, h);
-    const gData = gCtx.getImageData(0, 0, w, h);
-    toGrayscale(gData.data);
-    gCtx.putImageData(gData, 0, 0);
-
-    // ── 3. High Contrast grayscale ──
-    const cHC = makeCanvas(w, h);
-    const hCtx = cHC.getContext('2d');
-    hCtx.drawImage(bitmap, 0, 0, w, h);
-    const hData = hCtx.getImageData(0, 0, w, h);
-    toHighContrast(hData.data);
-    hCtx.putImageData(hData, 0, 0);
-
-    // ── 4. Adaptive threshold (binarise) ──
-    const cThr = makeCanvas(w, h);
-    const tCtx = cThr.getContext('2d');
-    tCtx.drawImage(bitmap, 0, 0, w, h);
-    const tData = tCtx.getImageData(0, 0, w, h);
-    toAdaptiveThreshold(tData.data);
-    tCtx.putImageData(tData, 0, 0);
-
-    // Convert all canvases to Blobs in parallel
-    const [bOrig, bGray, bHC, bThr] = await Promise.all([
-        canvasToBlob(cOrig, 'image/jpeg', 0.95),
-        canvasToBlob(cGray, 'image/jpeg', 0.95),
-        canvasToBlob(cHC,   'image/jpeg', 0.95),
-        canvasToBlob(cThr,  'image/jpeg', 0.95)
-    ]);
-
-    // Return in order of typical OCR effectiveness for Indian documents
-    return [
-        { name: 'highContrast', blob: bHC   },
-        { name: 'grayscale',    blob: bGray  },
-        { name: 'threshold',    blob: bThr   },
-        { name: 'original',     blob: bOrig  }
-    ];
-}
-
-// ── Pixel manipulation helpers ──
-function toGrayscale(d) {
-    for (let i = 0; i < d.length; i += 4) {
-        const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-        d[i] = d[i + 1] = d[i + 2] = g;
-    }
-}
-
-function toHighContrast(d) {
-    const factor = (259 * (2.0 + 255)) / (255 * (259 - 2.0));
+// High-contrast grayscale: best first attempt for Indian ID cards
+function applyHighContrast(d) {
+    // Contrast factor ≈ 1.8 — strong but not clipping fine text
+    const factor = (259 * (1.8 + 255)) / (255 * (259 - 1.8));
     for (let i = 0; i < d.length; i += 4) {
         const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
         const e = Math.max(0, Math.min(255, factor * (g - 128) + 128));
         d[i] = d[i + 1] = d[i + 2] = e;
+        // alpha (d[i+3]) unchanged
     }
 }
 
-function toAdaptiveThreshold(d) {
-    // Calculate mean brightness
-    let total = 0;
+// Adaptive threshold / binarise: helps with uneven lighting
+function applyThreshold(d) {
+    // Single pass: compute mean, then binarise
+    let sum = 0;
+    const pixels = d.length / 4;
     for (let i = 0; i < d.length; i += 4) {
-        total += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
     }
-    const mean = total / (d.length / 4);
-    const thr  = mean * 0.85;
+    const thr = (sum / pixels) * 0.82;
     for (let i = 0; i < d.length; i += 4) {
         const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
         const b = g > thr ? 255 : 0;
@@ -462,8 +515,16 @@ function toAdaptiveThreshold(d) {
     }
 }
 
+// ============================================================
+// canvas.toBlob wrapper
+// ============================================================
 function canvasToBlob(canvas, type, quality) {
-    return new Promise((resolve) => canvas.toBlob(resolve, type, quality));
+    return new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => {
+            if (blob) resolve(blob);
+            else reject(new Error('canvas.toBlob returned null'));
+        }, type, quality);
+    });
 }
 
 // ============================================================
