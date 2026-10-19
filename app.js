@@ -618,137 +618,474 @@ function showOcrMessage(type, text, cls) {
 }
 
 // ============================================================
-// Aadhaar Detail Extraction
+// AADHAAR PARSER — document-specific, field-validated
 // ============================================================
-function extractAadhaarDetails(text, confidence) {
-    let detected = false;
-    const type = 'aadhaar';
+function extractAadhaarDetails(rawText, ocrConf) {
+    const docType = 'aadhaar';
+    logDebug('Aadhaar parser start', { ocrConf, chars: rawText.length });
 
-    logDebug('Extracting Aadhaar from text length', text.length);
+    // ── 1. Document-type verification ──
+    // An Aadhaar card must contain at least one of these identifiers.
+    const aadhaarMarkers = [
+        'aadhaar', 'uidai', 'unique identification',
+        'govt of india', 'government of india',
+        'मेरा आधार', 'आधार', 'vid:'
+    ];
+    const lowerText = rawText.toLowerCase();
+    const isAadhaar = aadhaarMarkers.some(m => lowerText.includes(m));
 
-    // ── Aadhaar number ──
-    // Handles: 1234 5678 9012 | 1234-5678-9012 | 123456789012
-    // Also catches OCR noise like 1234\n5678\n9012
-    const cleaned = text.replace(/\n/g, ' ');
-    const numMatch = cleaned.match(/\b(\d{4}[\s\-]?\d{4}[\s\-]?\d{4})\b/);
-    if (numMatch) {
-        const raw = numMatch[1].replace(/[\s\-]/g, '');
-        if (raw.length === 12) {
-            document.getElementById('aadhaarNumber').value = raw;
-            detected = true;
-            logDebug('Aadhaar number found');
-        }
+    if (!isAadhaar) {
+        // Be lenient: if Tesseract didn't read the header (blurry top),
+        // still attempt extraction but warn the admin.
+        logDebug('Aadhaar markers not found — proceeding with caution');
     }
 
-    // ── Full Name ──
-    // Aadhaar cards print names in Title Case OR ALL CAPS
-    const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 1);
-    const skipWords = ['aadhaar', 'government', 'india', 'unique', 'authority',
-                       'enrolment', 'enrollment', 'dob', 'year', 'male', 'female',
-                       'address', 'village', 'district', 'state', 'pin'];
-    for (const line of lines) {
-        const noDigit = !/\d/.test(line);
-        const noSpecial = !/[<>\/\\@#$%^&*()_+=\[\]{};:'",]/.test(line);
-        const goodLen = line.length >= 4 && line.length <= 55;
-        const looksLikeName =
-            /^[A-Z][a-z]+(\s+[A-Za-z]+)+$/.test(line) ||   // Title Case
-            /^[A-Z]{2,}(\s+[A-Z]{2,})+$/.test(line);        // ALL CAPS
-        const ll = line.toLowerCase();
-        const notHeader = skipWords.every(w => !ll.includes(w));
-        if (noDigit && noSpecial && goodLen && looksLikeName && notHeader) {
-            document.getElementById('fullName').value = toTitleCase(line);
-            detected = true;
-            logDebug('Name found');
-            break;
-        }
-    }
+    // Normalise: collapse all whitespace variations used in OCR output
+    const lines    = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+    const flatText = lines.join(' ');
 
-    // ── Date of Birth ──
-    // DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
-    const dobMatch = text.match(/\b(0?[1-9]|[12]\d|3[01])[\/\-\.](0?[1-9]|1[0-2])[\/\-\.](\d{4})\b/);
-    if (dobMatch) {
-        const d = dobMatch[1].padStart(2,'0');
-        const m = dobMatch[2].padStart(2,'0');
-        const y = dobMatch[3];
-        document.getElementById('dateOfBirth').value = `${y}-${m}-${d}`;
-        detected = true;
-        logDebug('DOB found');
-    }
+    const result = {
+        aadhaarNumber: null,   // { value, confidence: 'high'|'medium'|'low' }
+        name:          null,
+        dob:           null
+    };
 
-    if (detected) {
-        showOcrMessage(type, 'Details detected. Please verify before saving.', 'success');
-    } else {
-        showOcrMessage(type,
-            'Could not detect details. Please retake the photo or enter manually.', 'error');
-    }
-}
+    // ── 2. Aadhaar Number extraction ──
+    // Strategy: look for exactly 3 groups of 4 digits with optional separators.
+    // We search the flat text (newlines collapsed) to catch multi-line OCR.
+    const numPatterns = [
+        /\b(\d{4})\s(\d{4})\s(\d{4})\b/,     // "1234 5678 9012"
+        /\b(\d{4})-(\d{4})-(\d{4})\b/,         // "1234-5678-9012"
+        /\b(\d{4})(\d{4})(\d{4})\b/,            // "123456789012"
+    ];
 
-// ============================================================
-// PAN Detail Extraction
-// ============================================================
-function extractPanDetails(text, confidence) {
-    let detected = false;
-    const type = 'pan';
-
-    logDebug('Extracting PAN from text length', text.length);
-
-    // ── PAN Number ──
-    // Format: ABCDE1234F — 5 letters, 4 digits, 1 letter
-    // OCR sometimes introduces spaces: ABCDE 1234 F
-    const panClean = text.replace(/\s/g, '');
-    const panMatch = panClean.match(/[A-Z]{5}[0-9]{4}[A-Z]/i);
-    if (panMatch) {
-        document.getElementById('panNumber').value = panMatch[0].toUpperCase();
-        detected = true;
-        logDebug('PAN number found');
-    }
-
-    // ── Full Name — only if not already filled ──
-    if (!document.getElementById('fullName').value) {
-        const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 1);
-        const skipWords = ['permanent', 'account', 'number', 'income', 'tax',
-                           'department', 'government', 'india', 'father', 'name'];
-        for (const line of lines) {
-            const noDigit   = !/\d/.test(line);
-            const noSpecial = !/[<>\/\\@#$%^&*()_+=\[\]{};:'",]/.test(line);
-            const goodLen   = line.length >= 4 && line.length <= 55;
-            const looksLikeName =
-                /^[A-Z][a-z]+(\s+[A-Za-z]+)+$/.test(line) ||
-                /^[A-Z]{2,}(\s+[A-Z]{2,})+$/.test(line);
-            const ll = line.toLowerCase();
-            const notHeader = skipWords.every(w => !ll.includes(w));
-            if (noDigit && noSpecial && goodLen && looksLikeName && notHeader) {
-                document.getElementById('fullName').value = toTitleCase(line);
-                detected = true;
-                logDebug('Name found from PAN');
+    for (const pat of numPatterns) {
+        const m = flatText.match(pat);
+        if (m) {
+            const digits = (m[1] + m[2] + m[3]).replace(/\D/g, '');
+            if (digits.length === 12 && /^\d{12}$/.test(digits)) {
+                // Reject VID numbers that sometimes appear — they are 16 digits but
+                // a 12-digit match in this position is almost always the Aadhaar number.
+                // Extra check: first digit of Aadhaar is never 0 or 1.
+                const firstDigit = parseInt(digits[0]);
+                const conf = (ocrConf >= 60 && firstDigit >= 2) ? 'high'
+                           : (ocrConf >= 40 || firstDigit >= 2) ? 'medium'
+                           : 'low';
+                result.aadhaarNumber = { value: digits, confidence: conf };
+                logDebug('Aadhaar number', { value: '[REDACTED 12 digits]', conf });
                 break;
             }
         }
     }
 
-    // ── DOB — only if not already filled ──
-    if (!document.getElementById('dateOfBirth').value) {
-        const dobMatch = text.match(/\b(0?[1-9]|[12]\d|3[01])[\/\-\.](0?[1-9]|1[0-2])[\/\-\.](\d{4})\b/);
-        if (dobMatch) {
-            const d = dobMatch[1].padStart(2,'0');
-            const m = dobMatch[2].padStart(2,'0');
-            const y = dobMatch[3];
-            document.getElementById('dateOfBirth').value = `${y}-${m}-${d}`;
-            detected = true;
-            logDebug('DOB found from PAN');
+    // ── 3. Name extraction ──
+    // Aadhaar card layout (physical card):
+    //   Line 1 or 2: Name (Title Case or ALL CAPS)
+    //   Later:       DOB label
+    //   Bottom area: Address
+    // We look for the first qualifying name line BEFORE the DOB line.
+    const skipWords = [
+        'aadhaar', 'uid', 'uidai', 'government', 'india', 'unique',
+        'authority', 'enrolment', 'enrollment', 'dob', 'date', 'birth',
+        'year', 'male', 'female', 'address', 'village', 'district',
+        'state', 'pin', 'post', 'house', 'near', 'ward', 'download',
+        'digitally', 'signed', 'valid'
+    ];
+
+    // Find the line index where DOB appears so we only look above it
+    let dobLineIdx = lines.length;
+    for (let i = 0; i < lines.length; i++) {
+        if (/\b(dob|date of birth|जन्म|DOB)\b/i.test(lines[i]) ||
+            /\b\d{2}[\/\-\.]\d{2}[\/\-\.]\d{4}\b/.test(lines[i])) {
+            dobLineIdx = i;
+            break;
         }
     }
 
-    if (detected) {
-        showOcrMessage(type, 'Details detected. Please verify before saving.', 'success');
+    for (let i = 0; i < Math.min(dobLineIdx + 2, lines.length); i++) {
+        const line = lines[i];
+        const ll   = line.toLowerCase();
+
+        // Skip lines with digits (addresses, numbers)
+        if (/\d/.test(line)) continue;
+
+        // Skip lines containing known non-name words
+        if (skipWords.some(w => ll.includes(w))) continue;
+
+        // Skip lines that are too short or too long
+        if (line.length < 3 || line.length > 60) continue;
+
+        // Skip lines with non-name special characters
+        if (/[<>\/\\@#$%^&*()_+=\[\]{};:'",!?]/.test(line)) continue;
+
+        // Must look like a name: Title Case, ALL CAPS, or mixed (OCR artefact)
+        const titleCase = /^[A-Z][a-z]{1,}(\s+[A-Za-z]{1,}){1,5}$/.test(line);
+        const allCaps   = /^[A-Z]{2,}(\s+[A-Z]{2,}){1,5}$/.test(line);
+        const mixedOcr  = /^[A-Za-z]{2,}(\s+[A-Za-z]{2,}){1,5}$/.test(line) &&
+                          line.split(' ').length >= 2;
+
+        if (titleCase || allCaps || mixedOcr) {
+            const nameConf = (ocrConf >= 60) ? 'high' : (ocrConf >= 35) ? 'medium' : 'low';
+            result.name = { value: toTitleCase(line), confidence: nameConf };
+            logDebug('Name found', { line: line.substring(0,3) + '...', nameConf });
+            break;
+        }
+    }
+
+    // ── 4. Date of Birth extraction ──
+    // Aadhaar DOB formats: DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
+    // Also "Year of Birth: YYYY" when full DOB is hidden (masked card)
+    const dobFull = flatText.match(
+        /\b(?:DOB|D\.O\.B|Date of Birth)[:\s]*(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})\b/i
+    );
+    const dobPlain = flatText.match(
+        /\b(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})\b/
+    );
+    const dobYearOnly = flatText.match(
+        /\b(?:Year of Birth|YOB)[:\s]*(\d{4})\b/i
+    );
+
+    if (dobFull) {
+        const d = dobFull[1].padStart(2,'0');
+        const m = dobFull[2].padStart(2,'0');
+        const y = dobFull[3];
+        if (isValidDate(d, m, y)) {
+            result.dob = { value: `${y}-${m}-${d}`, confidence: 'high' };
+            logDebug('DOB found (labeled)', result.dob.value);
+        }
+    } else if (dobPlain) {
+        const d = dobPlain[1].padStart(2,'0');
+        const m = dobPlain[2].padStart(2,'0');
+        const y = dobPlain[3];
+        if (isValidDate(d, m, y)) {
+            const dobConf = (ocrConf >= 55) ? 'medium' : 'low';
+            result.dob = { value: `${y}-${m}-${d}`, confidence: dobConf };
+            logDebug('DOB found (plain)', result.dob.value);
+        }
+    } else if (dobYearOnly) {
+        // Year-only masked cards — can't fill date input without full date
+        logDebug('Only birth year found, skipping DOB fill');
+    }
+
+    // ── 5. Apply to form with confidence tiers ──
+    applyAadhaarToForm(result, isAadhaar, docType);
+}
+
+function applyAadhaarToForm(result, isAadhaar, docType) {
+    let filledCount  = 0;
+    let warnCount    = 0;
+    const warnings   = [];
+
+    // Aadhaar Number
+    if (result.aadhaarNumber) {
+        const { value, confidence } = result.aadhaarNumber;
+        if (confidence === 'high' || confidence === 'medium') {
+            document.getElementById('aadhaarNumber').value = value;
+            filledCount++;
+            if (confidence === 'medium') {
+                warnings.push('Aadhaar number — please verify');
+                warnCount++;
+            }
+        } else {
+            warnings.push('Aadhaar number unclear — enter manually');
+            warnCount++;
+        }
     } else {
-        showOcrMessage(type,
-            'Could not detect details. Please retake the photo or enter manually.', 'error');
+        warnings.push('Aadhaar number not detected');
+        warnCount++;
+    }
+
+    // Name
+    if (result.name) {
+        const { value, confidence } = result.name;
+        if (confidence === 'high') {
+            document.getElementById('fullName').value = value;
+            filledCount++;
+        } else if (confidence === 'medium') {
+            document.getElementById('fullName').value = value;
+            filledCount++;
+            warnings.push('Name — please verify spelling');
+            warnCount++;
+        } else {
+            warnings.push('Name unclear — enter manually');
+            warnCount++;
+        }
+    } else {
+        warnings.push('Name not detected');
+        warnCount++;
+    }
+
+    // DOB
+    if (result.dob) {
+        const { value, confidence } = result.dob;
+        if (confidence === 'high' || confidence === 'medium') {
+            document.getElementById('dateOfBirth').value = value;
+            filledCount++;
+            if (confidence === 'medium') {
+                warnings.push('Date of birth — please verify');
+                warnCount++;
+            }
+        } else {
+            warnings.push('Date of birth unclear — enter manually');
+            warnCount++;
+        }
+    } else {
+        warnings.push('Date of birth not detected');
+        warnCount++;
+    }
+
+    // Build status message
+    if (filledCount === 0) {
+        showOcrMessage(docType,
+            '⚠ Could not read any details. Please retake with the card filling the frame in good light.',
+            'error');
+    } else if (warnCount === 0) {
+        showOcrMessage(docType,
+            '✓ Details detected. Please verify before saving.',
+            'success');
+    } else {
+        const msg = '⚠ Partial details detected. ' + warnings.join(' • ');
+        showOcrMessage(docType, msg, 'warning');
+    }
+
+    if (!isAadhaar && filledCount > 0) {
+        showOcrMessage(docType,
+            '⚠ This may not be an Aadhaar card. Please verify all extracted details.',
+            'warning');
     }
 }
 
 // ============================================================
-// Helper: Convert ALL CAPS name to Title Case
+// PAN PARSER — document-specific, field-validated
+// ============================================================
+function extractPanDetails(rawText, ocrConf) {
+    const docType = 'pan';
+    logDebug('PAN parser start', { ocrConf, chars: rawText.length });
+
+    // ── 1. Document-type verification ──
+    const panMarkers = [
+        'income tax', 'permanent account', 'govt of india',
+        'government of india', 'income-tax', 'pan'
+    ];
+    const lowerText = rawText.toLowerCase();
+    const isPan = panMarkers.some(m => lowerText.includes(m));
+
+    if (!isPan) logDebug('PAN markers not found — proceeding with caution');
+
+    const lines    = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+    const flatText = lines.join(' ');
+
+    const result = {
+        panNumber: null,
+        name:      null,
+        dob:       null
+    };
+
+    // ── 2. PAN Number extraction ──
+    // Format: exactly 5 uppercase letters + 4 digits + 1 uppercase letter
+    // OCR may introduce spaces: "ABCDE 1234 F" or lowercase: "abcde1234f"
+    // We strip spaces, uppercase, then match.
+    const noSpace = flatText.replace(/\s/g, '').toUpperCase();
+    const panMatch = noSpace.match(/[A-Z]{5}[0-9]{4}[A-Z]/);
+
+    if (panMatch) {
+        const candidate = panMatch[0];
+        // Structural validation:
+        // 4th char must be P (personal), C (company), H (HUF), F (firm), etc.
+        const validTypes = 'PCHABGJLTFE';
+        const fourthChar = candidate[3];
+        const isStructurallyValid = validTypes.includes(fourthChar);
+
+        const conf = (isStructurallyValid && ocrConf >= 55) ? 'high'
+                   : (ocrConf >= 35) ? 'medium'
+                   : 'low';
+
+        result.panNumber = { value: candidate, confidence: conf };
+        logDebug('PAN number found', { length: candidate.length, conf });
+    }
+
+    // ── 3. Name extraction from PAN card ──
+    // PAN card layout:
+    //   Line: "INCOME TAX DEPARTMENT" (header)
+    //   Line: "GOVT. OF INDIA" (header)
+    //   Line: Name of holder (ALL CAPS on most PAN cards)
+    //   Line: Father's name (ALL CAPS)
+    //   Line: Date of Birth
+    //   Line: PAN Number
+    //
+    // Strategy: find the PAN number line, then the name is usually 2-4 lines above it.
+    // The FIRST all-caps name line (after headers) = holder's name.
+    // The SECOND all-caps name line = father's name.
+
+    const skipWords = [
+        'income', 'tax', 'department', 'government', 'govt', 'india',
+        'permanent', 'account', 'number', 'pan', 'card', 'signature',
+        'date', 'birth', 'father', 'name', 'of'
+    ];
+
+    let panLineIdx = lines.length;
+    if (result.panNumber) {
+        for (let i = 0; i < lines.length; i++) {
+            if (lines[i].replace(/\s/g,'').toUpperCase().includes(result.panNumber.value)) {
+                panLineIdx = i;
+                break;
+            }
+        }
+    }
+
+    let nameCount = 0;
+    for (let i = 0; i < lines.length && i < panLineIdx; i++) {
+        const line = lines[i];
+        const ll   = line.toLowerCase();
+
+        if (/\d/.test(line)) continue;
+        if (skipWords.some(w => ll === w || ll.startsWith(w + ' '))) continue;
+        if (line.length < 3 || line.length > 60) continue;
+        if (/[<>\/\\@#$%^&*()_+=\[\]{};:'",!?]/.test(line)) continue;
+
+        const allCaps  = /^[A-Z]{2,}(\s+[A-Z]{2,})*$/.test(line);
+        const titleCse = /^[A-Z][a-z]+(\s+[A-Za-z]+)+$/.test(line);
+
+        if (allCaps || titleCse) {
+            // Skip the header lines by checking skipWords more aggressively
+            const allWordsOk = line.split(' ').every(w =>
+                w.length >= 2 && !skipWords.includes(w.toLowerCase())
+            );
+            if (!allWordsOk) continue;
+
+            nameCount++;
+            if (nameCount === 1) {
+                // First qualifying name = holder name
+                const nameConf = (ocrConf >= 55) ? 'high' : (ocrConf >= 35) ? 'medium' : 'low';
+                result.name = { value: toTitleCase(line), confidence: nameConf };
+                logDebug('PAN holder name found', { nameConf });
+            } else {
+                // Second name = father's name — stop here, don't overwrite
+                break;
+            }
+        }
+    }
+
+    // ── 4. DOB extraction ──
+    // PAN cards often print DOB near the bottom: "01/01/1990"
+    const dobLabeled = flatText.match(
+        /\b(?:DOB|Date of Birth)[:\s]*(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})\b/i
+    );
+    const dobPlain = flatText.match(
+        /\b(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})\b/
+    );
+
+    const dobSrc = dobLabeled || dobPlain;
+    if (dobSrc) {
+        const d = dobSrc[1].padStart(2,'0');
+        const m = dobSrc[2].padStart(2,'0');
+        const y = dobSrc[3];
+        if (isValidDate(d, m, y)) {
+            const dobConf = dobLabeled ? 'high' : (ocrConf >= 55 ? 'medium' : 'low');
+            result.dob = { value: `${y}-${m}-${d}`, confidence: dobConf };
+            logDebug('PAN DOB found', result.dob.value);
+        }
+    }
+
+    // ── 5. Apply to form with confidence tiers ──
+    applyPanToForm(result, isPan, docType);
+}
+
+function applyPanToForm(result, isPan, docType) {
+    let filledCount = 0;
+    let warnCount   = 0;
+    const warnings  = [];
+
+    // PAN Number
+    if (result.panNumber) {
+        const { value, confidence } = result.panNumber;
+        if (confidence === 'high' || confidence === 'medium') {
+            document.getElementById('panNumber').value = value;
+            filledCount++;
+            if (confidence === 'medium') {
+                warnings.push('PAN number — please verify');
+                warnCount++;
+            }
+        } else {
+            warnings.push('PAN number unclear — enter manually');
+            warnCount++;
+        }
+    } else {
+        warnings.push('PAN number not detected');
+        warnCount++;
+    }
+
+    // Name — only fill if not already set (Aadhaar may have filled it)
+    if (result.name && !document.getElementById('fullName').value) {
+        const { value, confidence } = result.name;
+        if (confidence === 'high') {
+            document.getElementById('fullName').value = value;
+            filledCount++;
+        } else if (confidence === 'medium') {
+            document.getElementById('fullName').value = value;
+            filledCount++;
+            warnings.push('Name — please verify spelling');
+            warnCount++;
+        } else {
+            warnings.push('Name unclear — enter manually');
+            warnCount++;
+        }
+    }
+
+    // DOB — only fill if not already set
+    if (result.dob && !document.getElementById('dateOfBirth').value) {
+        const { value, confidence } = result.dob;
+        if (confidence === 'high' || confidence === 'medium') {
+            document.getElementById('dateOfBirth').value = value;
+            filledCount++;
+            if (confidence === 'medium') {
+                warnings.push('Date of birth — please verify');
+                warnCount++;
+            }
+        } else {
+            warnings.push('Date of birth unclear — enter manually');
+            warnCount++;
+        }
+    }
+
+    if (filledCount === 0) {
+        showOcrMessage(docType,
+            '⚠ Could not read any details. Please retake with the card filling the frame in good light.',
+            'error');
+    } else if (warnCount === 0) {
+        showOcrMessage(docType,
+            '✓ Details detected. Please verify before saving.',
+            'success');
+    } else {
+        showOcrMessage(docType,
+            '⚠ Partial details detected. ' + warnings.join(' • '),
+            'warning');
+    }
+
+    if (!isPan && filledCount > 0) {
+        showOcrMessage(docType,
+            '⚠ This may not be a PAN card. Please verify all extracted details.',
+            'warning');
+    }
+}
+
+// ============================================================
+// Date Validation Helper
+// ============================================================
+function isValidDate(d, m, y) {
+    const day  = parseInt(d, 10);
+    const mon  = parseInt(m, 10);
+    const year = parseInt(y, 10);
+    if (mon < 1 || mon > 12) return false;
+    if (day < 1 || day > 31) return false;
+    if (year < 1900 || year > new Date().getFullYear()) return false;
+    // Check month-specific day limits
+    const maxDays = new Date(year, mon, 0).getDate();
+    return day <= maxDays;
+}
+
+// ============================================================
+// Helper: Convert to Title Case
 // ============================================================
 function toTitleCase(str) {
     return str.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
