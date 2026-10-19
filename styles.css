@@ -34,9 +34,14 @@
     --radius-lg: 16px;
 }
 
+/* Light polish: slightly softer background */
+body {
+    background-color: #eef2f7;
+}
+
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-    background-color: var(--gray-100);
+    background-color: #eef2f7;
     color: var(--gray-800);
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
@@ -143,10 +148,16 @@ body {
 
 .stat-card {
     background: var(--white);
-    padding: 1.5rem;
+    padding: 1.25rem 1rem;
     border-radius: var(--radius);
     box-shadow: var(--shadow);
     text-align: center;
+    border-top: 3px solid var(--primary-blue);
+    transition: box-shadow 0.15s;
+}
+
+.stat-card:hover {
+    box-shadow: var(--shadow-md);
 }
 
 .stat-value {
@@ -329,13 +340,16 @@ body {
 
 /* Form Screen */
 .form-header {
-    background: var(--primary-blue);
+    background: linear-gradient(135deg, #1e40af 0%, #2563eb 60%, #3b82f6 100%);
     color: var(--white);
-    padding: 1.5rem;
+    padding: 1rem 1.5rem;
     display: flex;
     align-items: center;
     gap: 1rem;
-    box-shadow: var(--shadow-md);
+    box-shadow: 0 2px 12px rgba(37, 99, 235, 0.35);
+    position: sticky;
+    top: 0;
+    z-index: 100;
 }
 
 .btn-back {
@@ -345,31 +359,69 @@ body {
     padding: 0.5rem;
     border-radius: var(--radius-sm);
     cursor: pointer;
+    transition: background 0.2s;
+    -webkit-tap-highlight-color: transparent;
 }
 
+.btn-back:hover {
+    background: rgba(255, 255, 255, 0.3);
+}
+
+/* Dashboard header — light polish: gradient + shadow */
 .dashboard-header {
-    background: var(--white);
-    padding: 1.5rem;
-    box-shadow: var(--shadow-sm);
+    background: linear-gradient(135deg, #1e40af 0%, #2563eb 60%, #3b82f6 100%);
+    padding: 1rem 1.5rem;
+    box-shadow: 0 2px 12px rgba(37, 99, 235, 0.35);
     display: flex;
     align-items: center;
-    gap: 1rem;
+    color: var(--white);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+
+.dashboard-header h1 {
+    font-size: 1.375rem;
+    font-weight: 700;
+    color: var(--white);
 }
 
 .logo {
     flex-shrink: 0;
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,0.15));
 }
 
-.dashboard-header h1 {
-    font-size: 1.5rem;
+/* Header brand: logo + two-line text */
+.header-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.header-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+}
+
+.header-title {
+    font-size: 1.125rem;
     font-weight: 700;
-    color: var(--gray-900);
+    color: var(--white);
+    line-height: 1.2;
+    letter-spacing: -0.01em;
 }
 
-.subtitle {
-    font-size: 0.875rem;
-    opacity: 0.9;
+.header-subtitle {
+    font-size: 0.75rem;
+    color: rgba(255, 255, 255, 0.7);
+    font-weight: 400;
+    line-height: 1;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
 }
+
+
 
 .application-form {
     padding: 1.5rem;
@@ -378,9 +430,13 @@ body {
     width: 100%;
 }
 
-/* Form Groups */
+/* Form card wrapper — light depth */
 .form-group {
     margin-bottom: 1.5rem;
+    background: var(--white);
+    border-radius: var(--radius);
+    padding: 1.25rem;
+    box-shadow: var(--shadow-sm);
 }
 
 .form-group label {
@@ -388,7 +444,9 @@ body {
     font-weight: 600;
     color: var(--gray-700);
     margin-bottom: 0.5rem;
-    font-size: 0.875rem;
+    font-size: 0.8125rem;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
 }
 
 .form-group input[type="text"],
@@ -398,18 +456,20 @@ body {
 .form-group input[type="date"] {
     width: 100%;
     padding: 0.875rem 1rem;
-    border: 1px solid var(--gray-300);
+    border: 1.5px solid var(--gray-200);
     border-radius: var(--radius-sm);
     font-size: 1rem;
     background: var(--gray-50);
-    transition: all 0.2s;
+    transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+    -webkit-appearance: none;
+    appearance: none;
 }
 
 .form-group input:focus {
     outline: none;
     border-color: var(--primary-blue);
     background: var(--white);
-    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
 }
 
 .form-group input::placeholder {
@@ -418,22 +478,25 @@ body {
 
 /* Photo Upload */
 .photo-upload {
-    margin-bottom: 0.75rem;
+    margin-bottom: 0.875rem;
 }
 
 .photo-placeholder {
     border: 2px dashed var(--gray-300);
     border-radius: var(--radius);
-    padding: 2rem;
+    padding: 2.25rem 2rem;
     text-align: center;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: border-color 0.15s, background 0.15s;
     background: var(--gray-50);
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
 }
 
-.photo-placeholder:hover {
+.photo-placeholder:hover,
+.photo-placeholder:active {
     border-color: var(--primary-blue);
-    background: var(--gray-100);
+    background: #eff6ff;
 }
 
 .photo-placeholder svg {
@@ -485,15 +548,23 @@ body {
 
 /* OCR Message */
 .ocr-message {
-    margin-top: 0.5rem;
-    padding: 0.75rem;
+    margin-top: 0.625rem;
+    padding: 0.75rem 1rem;
     border-radius: var(--radius-sm);
     font-size: 0.875rem;
+    line-height: 1.5;
     display: none;
+    font-weight: 500;
 }
 
 .ocr-message.show {
     display: block;
+    animation: fadeIn 0.2s ease-out;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
 }
 
 .ocr-message.success {
@@ -636,8 +707,10 @@ body {
     font-size: 1rem;
     font-weight: 600;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: background 0.15s, transform 0.1s, box-shadow 0.15s;
     text-decoration: none;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
 }
 
 .btn:disabled {
@@ -648,36 +721,49 @@ body {
 .btn-primary {
     background: var(--primary-blue);
     color: var(--white);
+    box-shadow: 0 2px 6px rgba(37, 99, 235, 0.25);
 }
 
 .btn-primary:hover:not(:disabled) {
     background: var(--primary-blue-dark);
     transform: translateY(-1px);
-    box-shadow: var(--shadow-md);
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+}
+
+.btn-primary:active:not(:disabled) {
+    transform: translateY(0);
+    box-shadow: none;
 }
 
 .btn-secondary {
-    background: var(--gray-200);
-    color: var(--gray-800);
+    background: var(--gray-100);
+    color: var(--gray-700);
+    border: 1px solid var(--gray-200);
 }
 
 .btn-secondary:hover:not(:disabled) {
-    background: var(--gray-300);
+    background: var(--gray-200);
 }
 
 .btn-success {
     background: var(--success);
     color: var(--white);
+    box-shadow: 0 2px 6px rgba(16, 185, 129, 0.25);
 }
 
 .btn-success:hover:not(:disabled) {
     background: var(--success-dark);
     transform: translateY(-1px);
-    box-shadow: var(--shadow-md);
+    box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+}
+
+.btn-success:active:not(:disabled) {
+    transform: translateY(0);
+    box-shadow: none;
 }
 
 .btn-small {
-    padding: 0.5rem 1rem;
+    padding: 0.625rem 1rem;
     font-size: 0.875rem;
 }
 
@@ -978,5 +1064,105 @@ body {
         break-inside: avoid;
         box-shadow: none;
         border: 1px solid var(--gray-300);
+    }
+}
+
+/* ============================================================
+   Mobile touch polish — improved tap targets and affordances
+   ============================================================ */
+
+/* Larger touch targets on mobile */
+@media (max-width: 640px) {
+    .btn {
+        min-height: 48px;
+        padding: 0.875rem 1.25rem;
+    }
+
+    .btn-small {
+        min-height: 44px;
+        padding: 0.625rem 1rem;
+    }
+
+    .photo-placeholder {
+        padding: 2.5rem 1.5rem;
+        min-height: 120px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+    }
+
+    .form-group {
+        padding: 1rem;
+        border-radius: var(--radius-sm);
+    }
+
+    .form-group input[type="text"],
+    .form-group input[type="number"],
+    .form-group input[type="date"] {
+        padding: 0.9375rem 1rem;
+        font-size: 1rem;          /* prevent iOS auto-zoom */
+    }
+
+    .application-form {
+        padding: 0.875rem;
+    }
+
+    .login-form {
+        padding: 1.5rem;
+    }
+
+    .stat-card {
+        padding: 1rem 0.75rem;
+    }
+
+    .stat-value {
+        font-size: 1.5rem;
+    }
+
+    .modal-content {
+        margin: 0;
+        border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+        max-height: 85vh;
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+    }
+
+    /* Scan button — full width on mobile for easy tapping */
+    .btn-small.btn-secondary {
+        width: 100%;
+        margin-top: 0.25rem;
+    }
+
+    /* OCR message larger text on small screens */
+    .ocr-message {
+        font-size: 0.9375rem;
+        padding: 0.875rem 1rem;
+    }
+}
+
+/* btn-action touch fix */
+.btn-action {
+    -webkit-tap-highlight-color: transparent;
+    min-height: 36px;
+}
+
+/* payment section inside form card */
+.payment-section {
+    background: var(--gray-50);
+    padding: 1.25rem;
+    border-radius: var(--radius);
+    margin-bottom: 1.5rem;
+    border: 1px solid var(--gray-200);
+}
+
+/* form-header title sizing on small screens */
+@media (max-width: 400px) {
+    .form-header h1,
+    .dashboard-header h1 {
+        font-size: 1.125rem;
     }
 }

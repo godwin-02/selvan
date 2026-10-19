@@ -11,14 +11,20 @@
     <!-- Dashboard Screen -->
     <div id="dashboardScreen" class="screen hidden">
         <div class="dashboard-header">
-            <div class="logo">
-                <svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <rect width="40" height="40" rx="8" fill="#2563eb"/>
-                    <path d="M20 8L12 16H16V28H24V16H28L20 8Z" fill="white"/>
-                    <rect x="10" y="30" width="20" height="2" rx="1" fill="white" fill-opacity="0.7"/>
-                </svg>
+            <div class="header-brand">
+                <div class="logo">
+                    <!-- Shield + checkmark admin portal logo -->
+                    <svg width="38" height="38" viewBox="0 0 38 38" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <rect width="38" height="38" rx="10" fill="white" fill-opacity="0.15"/>
+                        <path d="M19 6L9 10V19C9 24.55 13.34 29.74 19 31C24.66 29.74 29 24.55 29 19V10L19 6Z" fill="white" fill-opacity="0.95"/>
+                        <path d="M15.5 19.5L17.5 21.5L22.5 16.5" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </div>
+                <div class="header-text">
+                    <span class="header-title">Admin Portal</span>
+                    <span class="header-subtitle">Application Dashboard</span>
+                </div>
             </div>
-            <h1>Application Dashboard</h1>
         </div>
         
         <!-- Stats Cards -->
@@ -65,18 +71,23 @@
     <div id="formScreen" class="screen">
         <div class="form-header">
             <button id="backToDashboard" class="btn btn-back">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
                     <path d="M19 12H5M12 19l-7-7 7-7"/>
                 </svg>
             </button>
-            <div class="logo">
-                <svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <rect width="40" height="40" rx="8" fill="#2563eb"/>
-                    <path d="M20 8L12 16H16V28H24V16H28L20 8Z" fill="white"/>
-                    <rect x="10" y="30" width="20" height="2" rx="1" fill="white" fill-opacity="0.7"/>
-                </svg>
+            <div class="header-brand">
+                <div class="logo">
+                    <svg width="38" height="38" viewBox="0 0 38 38" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <rect width="38" height="38" rx="10" fill="white" fill-opacity="0.15"/>
+                        <path d="M19 6L9 10V19C9 24.55 13.34 29.74 19 31C24.66 29.74 29 24.55 29 19V10L19 6Z" fill="white" fill-opacity="0.95"/>
+                        <path d="M15.5 19.5L17.5 21.5L22.5 16.5" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </div>
+                <div class="header-text">
+                    <span class="header-title">Admin Portal</span>
+                    <span class="header-subtitle">New Application</span>
+                </div>
             </div>
-            <h1>Admin Application Portal</h1>
         </div>
 
         <form id="applicationForm" class="application-form">
