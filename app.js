@@ -521,10 +521,8 @@ function processPanOCR(text, messageDiv) {
         // Look for name pattern
         if (/^[A-Z][a-z]+(\s+[A-Z][a-z]+)+$/.test(line) && !/\d/.test(line) && line.length > 3 && line.length < 50) {
             const lowerLine = line.toLowerCase();
-            if (!lowerLine.includes('permanent') && !lowerLine.includes('account') && !lowerLine.includes('number') && !lowerLine.includes('income') && !lowerLine.includes('tax')) {
-                // Only fill name if empty or if current name is shorter
-                const currentName = document.getElementById('fullName').value;
-                if (!currentName || line.length > currentName.length) {
+            if (!lowerLine.includes('permanent') && !lowerLine.includes('account') && !lowerLine.includes('number') && !lowerLine.includes('income') && !lowerLine.includes('tax') && !lowerLine.includes('department') && !lowerLine.includes('government') && !lowerLine.includes('india')) {
+                if (!document.getElementById('fullName').value) {
                     document.getElementById('fullName').value = line;
                     detected = true;
                 }
