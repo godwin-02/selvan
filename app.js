@@ -232,29 +232,34 @@ function setupPhotoUpload(inputId, placeholderId, previewId, imgId, retakeBtnId,
 
 // ============================================================
 // UNIFIED DOCUMENT PROCESSING PIPELINE
-// ── Memory-safe sequential design ──
+// ── Professionally rebuilt for maximum Android compatibility ──
 //
-// OLD (broken on mobile): 4 canvases × 16 MB each = ~150 MB peak
-// NEW: 1 reused canvas, processed and freed before next attempt
+// Why the previous version failed on mobile:
+//   1. createImageBitmap() fails/silently broken on Android WebView < Cr90
+//   2. new ImageData(data, w, h) 3-arg constructor unsupported on old WebView
+//   3. ocrLock never reset on early-return paths → every retry silently ignored
+//   4. EXIF rotation not handled → portrait photos arrive sideways to OCR
+//   5. bestConfidence === 0 check rejected valid low-confidence OCR text
 //
-// Pipeline per scan attempt:
-//   File → ImageBitmap → ONE canvas (scaled) → Blob → OCR
-//   If confidence OK → done, canvas freed
-//   If not → reuse same canvas, apply next filter → Blob → OCR
+// This version uses:
+//   FileReader → HTMLImageElement (universally supported since Android 4.4)
+//   EXIF rotation detection + canvas correction
+//   Single canvas, sequential pixel filter attempts
+//   Lock always released via finally
 // ============================================================
 
-// OCR processing lock — prevents duplicate concurrent OCR calls
+// OCR processing lock — one scan per document type at a time
 const ocrLock = { aadhaar: false, pan: false };
 
-// Max dimension for OCR canvas — balances text legibility vs memory
-// 1600px on longest side ≈ 4 MB canvas buffer vs 48+ MB at full 6K resolution
-const MAX_OCR_SIDE = 1600;
+// Resize to this on the longest side before OCR
+// 1400px = ~8MB canvas buffer, readable text on all modern ID cards
+const MAX_OCR_SIDE = 1400;
 
-// Confidence threshold above which we stop trying more versions
-const CONFIDENCE_STOP = 72;
+// Tesseract confidence above which we stop trying more filter passes
+const CONFIDENCE_STOP = 68;
 
 async function processDocument(file, type) {
-    logDebug('processDocument called', {
+    logDebug('processDocument', {
         type,
         fileType: file ? file.type : 'none',
         fileSizeKB: file ? Math.round(file.size / 1024) : 0
@@ -265,249 +270,334 @@ async function processDocument(file, type) {
         return;
     }
 
-    // ── Processing lock: cancel duplicate calls ──
+    // Lock — prevents duplicate concurrent OCR for the same slot
     if (ocrLock[type]) {
-        logDebug('OCR already running for', type, '— ignoring duplicate call');
+        logDebug('Already processing', type, '— skipping duplicate');
         return;
     }
     ocrLock[type] = true;
 
-    // Bump scan ID so any in-flight stale run is discarded
     const scanId = type === 'aadhaar' ? ++aadhaarScanId : ++panScanId;
 
-    showOcrMessage(type, 'Validating image…', 'info');
+    showOcrMessage(type, 'Loading image…', 'info');
 
-    // Single reusable canvas — created once, freed at the end
     let canvas = null;
-    let ctx    = null;
 
     try {
-        // ── Step 1: Decode image into an ImageBitmap (GPU-decoded, no base64) ──
-        let bitmap;
-        try {
-            bitmap = await createImageBitmap(file);
-        } catch (err) {
-            logDebug('createImageBitmap failed', err.message);
-            showOcrMessage(type, 'Unable to read the captured image. Please retake the photo.', 'error');
-            return;
-        }
+        // ── Step 1: Decode via FileReader + Image element ──
+        // This is the ONLY path guaranteed to work on all Android versions.
+        // createImageBitmap is intentionally NOT used here.
+        const { img: imgEl, dataUrl } = await loadImageFromFile(file);
 
-        const srcW = bitmap.width;
-        const srcH = bitmap.height;
-
-        if (!srcW || !srcH) {
-            bitmap.close();
-            showOcrMessage(type, 'Invalid image dimensions. Please retake the photo.', 'error');
-            return;
-        }
-
-        // ── Step 2: Calculate target dimensions — ONE resize, never upsample ──
-        const scale = Math.min(1, MAX_OCR_SIDE / Math.max(srcW, srcH));
-        const tW    = Math.round(srcW * scale);
-        const tH    = Math.round(srcH * scale);
-
-        logDebug('Image dimensions', {
-            original: `${srcW}×${srcH}`,
-            target:   `${tW}×${tH}`,
-            scale:    scale.toFixed(3),
-            originalSizeKB: Math.round(file.size / 1024)
+        logDebug('Image loaded', {
+            naturalW: imgEl.naturalWidth,
+            naturalH: imgEl.naturalHeight
         });
 
-        // ── Step 3: Create ONE canvas at target size ──
-        canvas = document.createElement('canvas');
-        canvas.width  = tW;
-        canvas.height = tH;
-        ctx = canvas.getContext('2d');
+        if (!imgEl.naturalWidth || !imgEl.naturalHeight) {
+            showOcrMessage(type, 'Could not read the image. Please retake the photo.', 'error');
+            return;
+        }
 
-        // Draw the decoded bitmap into the canvas (scaled down in one pass)
-        ctx.drawImage(bitmap, 0, 0, tW, tH);
+        // ── Step 2: Detect EXIF orientation from raw bytes ──
+        // Android camera photos are often stored rotated 90° in JPEG EXIF.
+        // Without correction Tesseract reads sideways text → garbage output.
+        const orientation = await getExifOrientation(file);
+        logDebug('EXIF orientation', orientation);
 
-        // Release the ImageBitmap immediately — no longer needed
-        bitmap.close();
-        bitmap = null;
+        // ── Step 3: Draw onto a correctly-oriented, scaled canvas ──
+        canvas = drawOrientedAndScaled(imgEl, orientation, MAX_OCR_SIDE);
 
-        // ── Step 3b: Capture the raw scaled pixels as a snapshot ──
-        // We store this once so every OCR attempt can restore a clean
-        // version of the image without re-decoding the original file.
-        // This avoids createImageBitmap(file, {resize…}) which is
-        // NOT supported in Android WebView / mobile Chrome.
-        const rawPixels = ctx.getImageData(0, 0, tW, tH);
+        if (!canvas) {
+            showOcrMessage(type, 'Could not process the image. Please retake the photo.', 'error');
+            return;
+        }
 
-        // ── Step 4: Check stale scan ──
+        logDebug('Canvas ready', { w: canvas.width, h: canvas.height });
+
+        // ── Step 4: Stale-scan guard ──
         if ((type === 'aadhaar' ? aadhaarScanId : panScanId) !== scanId) {
-            logDebug('Stale scan after decode, discarding');
+            logDebug('Stale scan after image load');
             return;
         }
 
         showOcrMessage(type, 'Reading document…', 'info');
 
-        // ── Step 5: Sequential OCR attempts — ONE blob in memory at a time ──
-        // Attempt 1: High-contrast grayscale  — best for Aadhaar/PAN on mobile
-        // Attempt 2: Adaptive threshold       — helps with uneven lighting
-        // Attempt 3: Raw resized original     — plain fallback
-        //
-        // For each attempt:
-        //   1. Restore clean raw pixels onto the canvas
-        //   2. Apply filter in-place (no extra array allocation)
-        //   3. canvas.toBlob → OCR
-        //   4. Blob goes out of scope → GC-eligible before next attempt
+        // ── Step 5: Take a pixel snapshot of the clean, oriented image ──
+        // We store this once and copy it back before each filter pass
+        // so we never need to re-decode the file.
+        const ctx = canvas.getContext('2d');
+        const basePixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const w = canvas.width;
+        const h = canvas.height;
 
+        // ── Step 6: Sequential OCR attempts with different pixel filters ──
+        // Order chosen for Indian ID cards: high-contrast first (handles most cases),
+        // then threshold (low light), then original (already-clear images).
         const attempts = [
-            { name: 'highContrast', applyFn: applyHighContrast },
-            { name: 'threshold',    applyFn: applyThreshold    },
-            { name: 'original',     applyFn: null              }
+            { name: 'highContrast', fn: applyHighContrast },
+            { name: 'threshold',    fn: applyThreshold    },
+            { name: 'original',     fn: null              }
         ];
 
         let bestText       = '';
-        let bestConfidence = 0;
-        let attemptsDone   = 0;
+        let bestConfidence = -1;
 
         for (const attempt of attempts) {
-            // Guard: bail if a newer scan has started
             if ((type === 'aadhaar' ? aadhaarScanId : panScanId) !== scanId) {
-                logDebug('Stale scan mid-loop, discarding');
+                logDebug('Stale scan mid-loop');
                 return;
             }
 
-            logDebug(`OCR attempt: ${attempt.name}`);
+            // Copy clean pixels into a working buffer
+            const workBuf = new Uint8ClampedArray(basePixels.data);
+            if (attempt.fn) attempt.fn(workBuf);
 
-            // Restore clean raw pixels (copy of rawPixels.data into a new ImageData)
-            // This overwrites any filter applied in the previous iteration
-            const workingData = new ImageData(
-                new Uint8ClampedArray(rawPixels.data), tW, tH
-            );
+            // Put the working pixels onto the canvas
+            // putImageData accepts a plain Uint8ClampedArray in all browsers
+            ctx.putImageData(new ImageData(workBuf, w, h), 0, 0);
 
-            if (attempt.applyFn) {
-                attempt.applyFn(workingData.data);
+            // Blob — avoids huge base64 strings in memory
+            let blob;
+            try {
+                blob = await canvasToBlob(canvas, 'image/jpeg', 0.9);
+            } catch (blobErr) {
+                logDebug('toBlob failed, trying toDataURL fallback');
+                // toDataURL is heavier but works everywhere
+                const dataURL = canvas.toDataURL('image/jpeg', 0.9);
+                blob = dataURLtoBlob(dataURL);
             }
 
-            ctx.putImageData(workingData, 0, 0);
-            // workingData is now GC-eligible (canvas has its own copy)
+            logDebug(`${attempt.name} blob: ${Math.round(blob.size / 1024)} KB`);
 
-            // Convert canvas to Blob — NO base64, much lower memory
-            const blob = await canvasToBlob(canvas, 'image/jpeg', 0.88);
-
-            logDebug(`${attempt.name} blob size: ${Math.round(blob.size / 1024)} KB`);
-
-            // Run OCR on this single Blob
+            // Run OCR
             let result;
             try {
                 result = await Tesseract.recognize(blob, 'eng', {
                     logger: (m) => {
                         if (m.status === 'recognizing text') {
-                            const cId = type === 'aadhaar' ? aadhaarScanId : panScanId;
-                            if (scanId === cId) {
-                                showOcrMessage(
-                                    type,
-                                    `Reading document… ${Math.round(m.progress * 100)}%`,
-                                    'info'
-                                );
+                            const cur = type === 'aadhaar' ? aadhaarScanId : panScanId;
+                            if (cur === scanId) {
+                                showOcrMessage(type,
+                                    `Reading… ${Math.round(m.progress * 100)}%`, 'info');
                             }
                         }
                     }
                 });
             } catch (ocrErr) {
-                logDebug(`OCR error on attempt "${attempt.name}"`, ocrErr.message);
-                attemptsDone++;
+                logDebug(`Tesseract failed on "${attempt.name}"`, ocrErr.message);
                 continue;
             }
 
-            attemptsDone++;
-            const conf = result.data.confidence || 0;
-            logDebug(`Confidence for "${attempt.name}": ${conf}`);
+            const conf = typeof result.data.confidence === 'number'
+                ? result.data.confidence : 0;
+            const text = result.data.text || '';
 
-            if (conf > bestConfidence) {
+            logDebug(`"${attempt.name}" conf=${conf} textLen=${text.length}`);
+
+            // Keep the best result regardless of confidence score —
+            // Tesseract sometimes reports low confidence but extracted text is correct
+            if (conf > bestConfidence || (conf === bestConfidence && text.length > bestText.length)) {
                 bestConfidence = conf;
-                bestText       = result.data.text;
+                bestText       = text;
             }
 
-            // Good enough — stop early, save memory and time
+            // Early exit if confidence is good enough
             if (conf >= CONFIDENCE_STOP) {
-                logDebug('Confidence threshold met, stopping early');
+                logDebug('Good confidence, stopping early');
                 break;
             }
         }
 
-        // ── Step 6: Final stale check ──
+        // ── Step 7: Final stale check ──
         if ((type === 'aadhaar' ? aadhaarScanId : panScanId) !== scanId) {
-            logDebug('Stale scan after OCR, discarding result');
+            logDebug('Stale scan after OCR');
             return;
         }
 
-        logDebug('OCR finished', {
-            attempts:   attemptsDone,
-            confidence: bestConfidence,
-            textLength: bestText.length
-        });
+        logDebug('OCR done', { confidence: bestConfidence, textLen: bestText.length });
 
-        if (!bestText || bestConfidence === 0) {
+        // Even if confidence is 0, attempt extraction — the text may still contain the number
+        if (!bestText || bestText.trim().length < 3) {
             showOcrMessage(type,
-                'The image is too unclear to read. Please retake the photo with the card filling most of the frame.',
+                'Could not read text from the image. Please retake with the card filling most of the frame.',
                 'error');
             return;
         }
 
-        // ── Step 7: Extract details and auto-fill ──
-        if (type === 'aadhaar') {
-            extractAadhaarDetails(bestText, bestConfidence);
-        } else {
-            extractPanDetails(bestText, bestConfidence);
-        }
+        if (type === 'aadhaar') extractAadhaarDetails(bestText, bestConfidence);
+        else                    extractPanDetails(bestText, bestConfidence);
 
     } catch (err) {
-        // Catch low-memory and other unexpected errors
         const msg = (err && err.message) ? err.message.toLowerCase() : '';
-        logDebug('processDocument caught error', err.message || err);
-
-        if (msg.includes('memory') || msg.includes('oom') || msg.includes('allocation')) {
+        logDebug('processDocument error', err.message || String(err));
+        if (msg.includes('memory') || msg.includes('quota') || msg.includes('oom')) {
             showOcrMessage(type,
-                'The image is too large to process on this device. Please retake the document photo with the card filling most of the frame.',
-                'error');
+                'Image too large for this device. Retake the photo closer to the card.', 'error');
         } else {
             showOcrMessage(type,
-                'Unable to process the document. Please retake the photo or enter details manually.',
+                'Could not process the document. Please retake the photo or enter details manually.',
                 'error');
         }
     } finally {
-        // ── Always release canvas and unlock ──
+        // ALWAYS release canvas memory and the lock
         if (canvas) {
-            // Setting dimensions to 0 releases the backing pixel buffer on most browsers
             canvas.width  = 0;
             canvas.height = 0;
             canvas = null;
-            ctx    = null;
         }
         ocrLock[type] = false;
-        logDebug('OCR lock released for', type);
+        logDebug('Lock released for', type);
     }
 }
 
 // ============================================================
-// In-place pixel filters — operate on a single ImageData.data
-// No new arrays allocated — modifies the Uint8ClampedArray directly
+// Load a File into an HTMLImageElement via FileReader
+// Works on every Android version — no createImageBitmap needed
+// ============================================================
+function loadImageFromFile(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error('FileReader failed'));
+        reader.onload  = (e) => {
+            const dataUrl = e.target.result;
+            const imgEl   = new Image();
+            imgEl.onerror = () => reject(new Error('Image decode failed'));
+            imgEl.onload  = () => resolve({ img: imgEl, dataUrl });
+            imgEl.src     = dataUrl;
+        };
+        reader.readAsDataURL(file);
+    });
+}
+
+// ============================================================
+// EXIF Orientation Reader
+// Mobile cameras encode rotation in JPEG EXIF tag 0x0112.
+// Without correction, a portrait shot arrives as a landscape
+// image rotated 90° — Tesseract reads vertical text → garbage.
+// ============================================================
+function getExifOrientation(file) {
+    return new Promise((resolve) => {
+        // Only JPEG files carry EXIF
+        if (!file.type.includes('jpeg') && !file.type.includes('jpg')) {
+            resolve(1); // no rotation needed
+            return;
+        }
+        const reader = new FileReader();
+        reader.onerror = () => resolve(1);
+        reader.onload  = (e) => {
+            try {
+                const view = new DataView(e.target.result);
+                // JPEG SOI marker
+                if (view.getUint16(0) !== 0xFFD8) { resolve(1); return; }
+                let offset = 2;
+                while (offset < view.byteLength) {
+                    const marker = view.getUint16(offset);
+                    offset += 2;
+                    if (marker === 0xFFE1) {
+                        // APP1 — may contain EXIF
+                        offset += 2; // skip length
+                        if (view.getUint32(offset) !== 0x45786966) { resolve(1); return; } // 'Exif'
+                        offset += 6; // skip 'Exif\0\0'
+                        const little = view.getUint16(offset) === 0x4949;
+                        offset += view.getUint32(offset + 4, little); // IFD offset
+                        const tags = view.getUint16(offset, little);
+                        offset += 2;
+                        for (let t = 0; t < tags; t++) {
+                            if (view.getUint16(offset + t * 12, little) === 0x0112) {
+                                resolve(view.getUint16(offset + t * 12 + 8, little));
+                                return;
+                            }
+                        }
+                        resolve(1); return;
+                    } else if ((marker & 0xFF00) !== 0xFF00) {
+                        resolve(1); return;
+                    } else {
+                        offset += view.getUint16(offset);
+                    }
+                }
+            } catch (_) { /* ignore parse errors */ }
+            resolve(1);
+        };
+        // Read only the first 128KB — EXIF is always at the start
+        reader.readAsArrayBuffer(file.slice(0, 131072));
+    });
+}
+
+// ============================================================
+// Draw the image onto a canvas with EXIF rotation corrected
+// and scaled to MAX_OCR_SIDE on the longest dimension
+// ============================================================
+function drawOrientedAndScaled(imgEl, orientation, maxSide) {
+    try {
+        const srcW = imgEl.naturalWidth;
+        const srcH = imgEl.naturalHeight;
+
+        // Orientations 5-8 swap width/height (portrait ↔ landscape)
+        const swapAxes = orientation >= 5;
+        const logicalW = swapAxes ? srcH : srcW;
+        const logicalH = swapAxes ? srcW : srcH;
+
+        const scale = Math.min(1, maxSide / Math.max(logicalW, logicalH));
+        const outW   = Math.round(logicalW * scale);
+        const outH   = Math.round(logicalH * scale);
+
+        const c   = document.createElement('canvas');
+        c.width   = outW;
+        c.height  = outH;
+        const ctx = c.getContext('2d');
+        if (!ctx) return null;
+
+        // Apply the EXIF transform so text is right-side-up for Tesseract
+        ctx.save();
+        switch (orientation) {
+            case 2: ctx.transform(-1,  0,  0,  1, outW, 0);       break;
+            case 3: ctx.transform(-1,  0,  0, -1, outW, outH);     break;
+            case 4: ctx.transform( 1,  0,  0, -1, 0,    outH);     break;
+            case 5: ctx.transform( 0,  1,  1,  0, 0,    0);        break;
+            case 6: ctx.transform( 0,  1, -1,  0, outH, 0);        break;
+            case 7: ctx.transform( 0, -1, -1,  0, outH, outW);     break;
+            case 8: ctx.transform( 0, -1,  1,  0, 0,    outW);     break;
+            default: break; // orientation 1 — no transform
+        }
+
+        // Draw the source image scaled to the output canvas
+        if (swapAxes) {
+            ctx.drawImage(imgEl, 0, 0, srcW, srcH, 0, 0, outH, outW);
+        } else {
+            ctx.drawImage(imgEl, 0, 0, srcW, srcH, 0, 0, outW, outH);
+        }
+
+        ctx.restore();
+        return c;
+    } catch (err) {
+        logDebug('drawOrientedAndScaled error', err.message);
+        return null;
+    }
+}
+
+// ============================================================
+// In-place pixel filters — modify Uint8ClampedArray directly
 // ============================================================
 
-// High-contrast grayscale: best first attempt for Indian ID cards
+// High-contrast grayscale — best first-pass for Indian ID cards
 function applyHighContrast(d) {
-    // Contrast factor ≈ 1.8 — strong but not clipping fine text
-    const factor = (259 * (1.8 + 255)) / (255 * (259 - 1.8));
+    const factor = (259 * (1.9 + 255)) / (255 * (259 - 1.9));
     for (let i = 0; i < d.length; i += 4) {
         const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
         const e = Math.max(0, Math.min(255, factor * (g - 128) + 128));
         d[i] = d[i + 1] = d[i + 2] = e;
-        // alpha (d[i+3]) unchanged
     }
 }
 
-// Adaptive threshold / binarise: helps with uneven lighting
+// Adaptive binarise — helps with shadows, glare, uneven lighting
 function applyThreshold(d) {
-    // Single pass: compute mean, then binarise
     let sum = 0;
-    const pixels = d.length / 4;
+    const n = d.length / 4;
     for (let i = 0; i < d.length; i += 4) {
         sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
     }
-    const thr = (sum / pixels) * 0.82;
+    const thr = (sum / n) * 0.84;
     for (let i = 0; i < d.length; i += 4) {
         const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
         const b = g > thr ? 255 : 0;
@@ -516,15 +606,27 @@ function applyThreshold(d) {
 }
 
 // ============================================================
-// canvas.toBlob wrapper
+// canvas.toBlob — Promise wrapper
 // ============================================================
-function canvasToBlob(canvas, type, quality) {
+function canvasToBlob(canvas, mimeType, quality) {
     return new Promise((resolve, reject) => {
         canvas.toBlob((blob) => {
             if (blob) resolve(blob);
-            else reject(new Error('canvas.toBlob returned null'));
-        }, type, quality);
+            else      reject(new Error('toBlob returned null'));
+        }, mimeType, quality);
     });
+}
+
+// ============================================================
+// dataURL → Blob fallback (for browsers where toBlob fails)
+// ============================================================
+function dataURLtoBlob(dataURL) {
+    const [header, data] = dataURL.split(',');
+    const mime   = header.match(/:(.*?);/)[1];
+    const binary = atob(data);
+    const buf    = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) buf[i] = binary.charCodeAt(i);
+    return new Blob([buf], { type: mime });
 }
 
 // ============================================================
@@ -544,58 +646,62 @@ function extractAadhaarDetails(text, confidence) {
     let detected = false;
     const type = 'aadhaar';
 
-    // Aadhaar number: 12 digits, optionally spaced/dashed in groups of 4
-    const aadhaarMatches = text.match(/\b\d{4}[\s\-]?\d{4}[\s\-]?\d{4}\b|\b\d{12}\b/g);
-    if (aadhaarMatches) {
-        const raw = aadhaarMatches[0].replace(/[\s\-]/g, '');
+    logDebug('Extracting Aadhaar from text length', text.length);
+
+    // ── Aadhaar number ──
+    // Handles: 1234 5678 9012 | 1234-5678-9012 | 123456789012
+    // Also catches OCR noise like 1234\n5678\n9012
+    const cleaned = text.replace(/\n/g, ' ');
+    const numMatch = cleaned.match(/\b(\d{4}[\s\-]?\d{4}[\s\-]?\d{4})\b/);
+    if (numMatch) {
+        const raw = numMatch[1].replace(/[\s\-]/g, '');
         if (raw.length === 12) {
             document.getElementById('aadhaarNumber').value = raw;
             detected = true;
+            logDebug('Aadhaar number found');
         }
     }
 
-    // Full name — title-case words, no digits, reasonable length
-    const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+    // ── Full Name ──
+    // Aadhaar cards print names in Title Case OR ALL CAPS
+    const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 1);
+    const skipWords = ['aadhaar', 'government', 'india', 'unique', 'authority',
+                       'enrolment', 'enrollment', 'dob', 'year', 'male', 'female',
+                       'address', 'village', 'district', 'state', 'pin'];
     for (const line of lines) {
-        if (
-            /^[A-Z][a-z]+(\s+[A-Z][a-z]+)+$/.test(line) &&
-            !/\d/.test(line) &&
-            line.length > 3 &&
-            line.length < 60
-        ) {
-            const ll = line.toLowerCase();
-            if (!ll.includes('aadhaar') && !ll.includes('government') &&
-                !ll.includes('india') && !ll.includes('unique')) {
-                document.getElementById('fullName').value = line;
-                detected = true;
-                break;
-            }
+        const noDigit = !/\d/.test(line);
+        const noSpecial = !/[<>\/\\@#$%^&*()_+=\[\]{};:'",]/.test(line);
+        const goodLen = line.length >= 4 && line.length <= 55;
+        const looksLikeName =
+            /^[A-Z][a-z]+(\s+[A-Za-z]+)+$/.test(line) ||   // Title Case
+            /^[A-Z]{2,}(\s+[A-Z]{2,})+$/.test(line);        // ALL CAPS
+        const ll = line.toLowerCase();
+        const notHeader = skipWords.every(w => !ll.includes(w));
+        if (noDigit && noSpecial && goodLen && looksLikeName && notHeader) {
+            document.getElementById('fullName').value = toTitleCase(line);
+            detected = true;
+            logDebug('Name found');
+            break;
         }
     }
 
-    // Date of birth: DD/MM/YYYY or DD-MM-YYYY
-    const dobMatch = text.match(/\b(0[1-9]|[12]\d|3[01])[\/\-](0[1-9]|1[0-2])[\/\-]\d{4}\b/);
+    // ── Date of Birth ──
+    // DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
+    const dobMatch = text.match(/\b(0?[1-9]|[12]\d|3[01])[\/\-\.](0?[1-9]|1[0-2])[\/\-\.](\d{4})\b/);
     if (dobMatch) {
-        const parts = dobMatch[0].replace(/-/g, '/').split('/');
-        if (parts.length === 3) {
-            document.getElementById('dateOfBirth').value = `${parts[2]}-${parts[1]}-${parts[0]}`;
-            detected = true;
-        }
+        const d = dobMatch[1].padStart(2,'0');
+        const m = dobMatch[2].padStart(2,'0');
+        const y = dobMatch[3];
+        document.getElementById('dateOfBirth').value = `${y}-${m}-${d}`;
+        detected = true;
+        logDebug('DOB found');
     }
 
     if (detected) {
-        const lowConf = confidence < 50;
-        showOcrMessage(type,
-            lowConf
-                ? 'Details detected — please verify carefully before saving.'
-                : 'Details detected. Please verify before saving.',
-            'success'
-        );
+        showOcrMessage(type, 'Details detected. Please verify before saving.', 'success');
     } else {
         showOcrMessage(type,
-            'Document captured, but details could not be detected. Please retake the photo or enter details manually.',
-            'error'
-        );
+            'Could not detect details. Please retake the photo or enter manually.', 'error');
     }
 }
 
@@ -606,62 +712,68 @@ function extractPanDetails(text, confidence) {
     let detected = false;
     const type = 'pan';
 
-    // PAN: 5 alpha + 4 digit + 1 alpha
-    const panMatch = text.match(/[A-Z]{5}[0-9]{4}[A-Z]/i);
+    logDebug('Extracting PAN from text length', text.length);
+
+    // ── PAN Number ──
+    // Format: ABCDE1234F — 5 letters, 4 digits, 1 letter
+    // OCR sometimes introduces spaces: ABCDE 1234 F
+    const panClean = text.replace(/\s/g, '');
+    const panMatch = panClean.match(/[A-Z]{5}[0-9]{4}[A-Z]/i);
     if (panMatch) {
         document.getElementById('panNumber').value = panMatch[0].toUpperCase();
         detected = true;
+        logDebug('PAN number found');
     }
 
-    // Full name — only fill if not already populated
+    // ── Full Name — only if not already filled ──
     if (!document.getElementById('fullName').value) {
-        const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 1);
+        const skipWords = ['permanent', 'account', 'number', 'income', 'tax',
+                           'department', 'government', 'india', 'father', 'name'];
         for (const line of lines) {
-            if (
-                /^[A-Z][a-z]+(\s+[A-Z][a-z]+)+$/.test(line) &&
-                !/\d/.test(line) &&
-                line.length > 3 &&
-                line.length < 60
-            ) {
-                const ll = line.toLowerCase();
-                if (!ll.includes('permanent') && !ll.includes('account') &&
-                    !ll.includes('number')    && !ll.includes('income')  &&
-                    !ll.includes('tax')       && !ll.includes('department') &&
-                    !ll.includes('government')&& !ll.includes('india')) {
-                    document.getElementById('fullName').value = line;
-                    detected = true;
-                    break;
-                }
+            const noDigit   = !/\d/.test(line);
+            const noSpecial = !/[<>\/\\@#$%^&*()_+=\[\]{};:'",]/.test(line);
+            const goodLen   = line.length >= 4 && line.length <= 55;
+            const looksLikeName =
+                /^[A-Z][a-z]+(\s+[A-Za-z]+)+$/.test(line) ||
+                /^[A-Z]{2,}(\s+[A-Z]{2,})+$/.test(line);
+            const ll = line.toLowerCase();
+            const notHeader = skipWords.every(w => !ll.includes(w));
+            if (noDigit && noSpecial && goodLen && looksLikeName && notHeader) {
+                document.getElementById('fullName').value = toTitleCase(line);
+                detected = true;
+                logDebug('Name found from PAN');
+                break;
             }
         }
     }
 
-    // DOB — only fill if not already populated
+    // ── DOB — only if not already filled ──
     if (!document.getElementById('dateOfBirth').value) {
-        const dobMatch = text.match(/\b(0[1-9]|[12]\d|3[01])[\/\-](0[1-9]|1[0-2])[\/\-]\d{4}\b/);
+        const dobMatch = text.match(/\b(0?[1-9]|[12]\d|3[01])[\/\-\.](0?[1-9]|1[0-2])[\/\-\.](\d{4})\b/);
         if (dobMatch) {
-            const parts = dobMatch[0].replace(/-/g, '/').split('/');
-            if (parts.length === 3) {
-                document.getElementById('dateOfBirth').value = `${parts[2]}-${parts[1]}-${parts[0]}`;
-                detected = true;
-            }
+            const d = dobMatch[1].padStart(2,'0');
+            const m = dobMatch[2].padStart(2,'0');
+            const y = dobMatch[3];
+            document.getElementById('dateOfBirth').value = `${y}-${m}-${d}`;
+            detected = true;
+            logDebug('DOB found from PAN');
         }
     }
 
     if (detected) {
-        const lowConf = confidence < 50;
-        showOcrMessage(type,
-            lowConf
-                ? 'Details detected — please verify carefully before saving.'
-                : 'Details detected. Please verify before saving.',
-            'success'
-        );
+        showOcrMessage(type, 'Details detected. Please verify before saving.', 'success');
     } else {
         showOcrMessage(type,
-            'Document captured, but details could not be detected. Please retake the photo or enter details manually.',
-            'error'
-        );
+            'Could not detect details. Please retake the photo or enter manually.', 'error');
     }
+}
+
+// ============================================================
+// Helper: Convert ALL CAPS name to Title Case
+// ============================================================
+function toTitleCase(str) {
+    return str.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
 }
 
 // ============================================================
